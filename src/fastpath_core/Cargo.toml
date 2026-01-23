@@ -1,0 +1,30 @@
+[package]
+name = "fastpath_core"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance tile scheduler for FastPATH WSI viewer"
+license = "MIT"
+
+[lib]
+name = "fastpath_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py311"] }
+rayon = "1.10"
+crossbeam-channel = "0.5"
+dashmap = "6.1"
+zune-jpeg = "0.4"
+thiserror = "2.0"
+parking_lot = "0.12"
+bytes = "1.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

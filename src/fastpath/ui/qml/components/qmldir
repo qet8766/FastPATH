@@ -1,0 +1,7 @@
+module components
+SlideViewer 1.0 SlideViewer.qml
+TileLayer 1.0 TileLayer.qml
+AnnotationOverlay 1.0 AnnotationOverlay.qml
+AnnotationTools 1.0 AnnotationTools.qml
+LayerPanel 1.0 LayerPanel.qml
+AIPanel 1.0 AIPanel.qml

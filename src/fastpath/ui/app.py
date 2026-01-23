@@ -1,0 +1,670 @@
+"""QML application setup for FastPATH viewer."""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QUrl, Slot, Signal, Property, QThread
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuickControls2 import QQuickStyle
+
+from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE
+from fastpath.core.slide import SlideManager
+from fastpath.core.annotations import AnnotationManager
+from fastpath.ai.manager import AIPluginManager
+from fastpath.ui.providers import TileImageProvider, ThumbnailProvider
+from fastpath.ui.models import TileModel, RecentFilesModel
+from fastpath.ui.navigator import SlideNavigator
+from fastpath_core import RustTileScheduler
+
+logger = logging.getLogger(__name__)
+
+
+class PreprocessWorker(QThread):
+    """Background worker for preprocessing slides."""
+
+    progressChanged = Signal(float, str)  # progress (0-1), status message
+    finished = Signal(str)  # result path or empty on error
+    errorOccurred = Signal(str)  # error message
+
+    def __init__(
+        self,
+        input_path: str,
+        output_dir: str,
+        tile_size: int = 512,
+        quality: int = 95,
+        method: str = "level1",
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.input_path = Path(input_path)
+        self.output_dir = Path(output_dir)
+        self.tile_size = tile_size
+        self.quality = quality
+        self.method = method
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation of preprocessing."""
+        self._cancelled = True
+
+    def run(self) -> None:
+        """Run preprocessing in background thread."""
+        try:
+            from fastpath.preprocess.pyramid import (
+                VipsPyramidBuilder,
+                is_vips_dzsave_available,
+            )
+
+            self.progressChanged.emit(0.0, "Starting preprocessing...")
+
+            # Check pyvips availability
+            if not is_vips_dzsave_available():
+                raise RuntimeError(
+                    "FastPATH requires pyvips with OpenSlide support. "
+                    "Please install libvips with OpenSlide enabled."
+                )
+
+            self.progressChanged.emit(0.05, "Initializing pyvips dzsave...")
+            builder = VipsPyramidBuilder(
+                tile_size=self.tile_size,
+                jpeg_quality=self.quality,
+                method=self.method,
+            )
+
+            def progress_callback(stage: str, current: int, total: int) -> None:
+                if self._cancelled:
+                    raise InterruptedError("Preprocessing cancelled")
+                # Map stages to progress ranges
+                if stage == "thumbnail":
+                    progress = 0.1
+                elif stage == "dzsave":
+                    progress = 0.8
+                elif stage.startswith("level_"):
+                    progress = 0.8 + 0.15 * (current / max(total, 1))
+                else:
+                    progress = 0.5
+                self.progressChanged.emit(progress, f"{stage}: {current}/{total}")
+
+            self.progressChanged.emit(0.1, "Processing slide...")
+            result = builder.build(
+                self.input_path,
+                self.output_dir,
+                progress_callback=progress_callback,
+                force=False,
+            )
+
+            if self._cancelled:
+                self.errorOccurred.emit("Preprocessing cancelled")
+                return
+
+            self.progressChanged.emit(1.0, "Complete!")
+            self.finished.emit(str(result) if result else "")
+
+        except InterruptedError:
+            self.errorOccurred.emit("Preprocessing cancelled")
+        except Exception as e:
+            logger.exception("Preprocessing failed")
+            self.errorOccurred.emit(str(e))
+
+
+class PreprocessController(QObject):
+    """Controller for preprocessing mode exposed to QML."""
+
+    isProcessingChanged = Signal()
+    progressChanged = Signal()
+    statusChanged = Signal()
+    inputFileChanged = Signal()
+    outputDirChanged = Signal()
+    resultPathChanged = Signal()
+    errorOccurred = Signal(str)
+    preprocessingFinished = Signal(str)  # result path
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._is_processing = False
+        self._progress = 0.0
+        self._status = "Ready"
+        self._input_file = ""
+        self._output_dir = ""
+        self._result_path = ""
+        self._worker: PreprocessWorker | None = None
+
+        # Settings with defaults
+        self._tile_size = 512
+        self._quality = 95
+
+    @Property(bool, notify=isProcessingChanged)
+    def isProcessing(self) -> bool:
+        return self._is_processing
+
+    @Property(float, notify=progressChanged)
+    def progress(self) -> float:
+        return self._progress
+
+    @Property(str, notify=statusChanged)
+    def status(self) -> str:
+        return self._status
+
+    @Property(str, notify=inputFileChanged)
+    def inputFile(self) -> str:
+        return self._input_file
+
+    @inputFile.setter
+    def inputFile(self, value: str) -> None:
+        if self._input_file != value:
+            self._input_file = value
+            self.inputFileChanged.emit()
+
+    @Property(str, notify=outputDirChanged)
+    def outputDir(self) -> str:
+        return self._output_dir
+
+    @outputDir.setter
+    def outputDir(self, value: str) -> None:
+        if self._output_dir != value:
+            self._output_dir = value
+            self.outputDirChanged.emit()
+
+    @Property(str, notify=resultPathChanged)
+    def resultPath(self) -> str:
+        return self._result_path
+
+    @Slot(str)
+    def setInputFile(self, path: str) -> None:
+        """Set input file from QML (handles file:// URLs)."""
+        if path.startswith("file:///"):
+            path = path[8:]
+        elif path.startswith("file://"):
+            path = path[7:]
+        self.inputFile = path
+
+        # Auto-set output dir to same directory as input if not set
+        if not self._output_dir:
+            self.outputDir = str(Path(path).parent)
+
+    @Slot(str)
+    def setOutputDir(self, path: str) -> None:
+        """Set output directory from QML (handles file:// URLs)."""
+        if path.startswith("file:///"):
+            path = path[8:]
+        elif path.startswith("file://"):
+            path = path[7:]
+        self.outputDir = path
+
+    @Slot(int, int, str)
+    def startPreprocess(self, tile_size: int, quality: int, method: str = "level1") -> None:
+        """Start preprocessing with given settings.
+
+        Args:
+            tile_size: Tile size in pixels (256, 512, or 1024)
+            quality: JPEG quality (70-100)
+            method: Extraction method - "level1" (extract level 1 directly)
+                    or "level0_resized" (extract level 0 and resize to ~20x)
+        """
+        if self._is_processing:
+            return
+
+        if not self._input_file:
+            self.errorOccurred.emit("No input file selected")
+            return
+
+        if not self._output_dir:
+            self.errorOccurred.emit("No output directory selected")
+            return
+
+        # Validate input file exists
+        input_path = Path(self._input_file)
+        if not input_path.exists():
+            self.errorOccurred.emit(f"Input file not found: {self._input_file}")
+            return
+
+        self._is_processing = True
+        self.isProcessingChanged.emit()
+        self._progress = 0.0
+        self.progressChanged.emit()
+        self._status = "Starting..."
+        self.statusChanged.emit()
+        self._result_path = ""
+        self.resultPathChanged.emit()
+
+        # Create and start worker
+        self._worker = PreprocessWorker(
+            self._input_file,
+            self._output_dir,
+            tile_size,
+            quality,
+            method,
+            self,
+        )
+        self._worker.progressChanged.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.errorOccurred.connect(self._on_error)
+        self._worker.start()
+
+    @Slot()
+    def cancelPreprocess(self) -> None:
+        """Cancel ongoing preprocessing."""
+        if self._worker:
+            self._worker.cancel()
+            self._status = "Cancelling..."
+            self.statusChanged.emit()
+
+    def _on_progress(self, progress: float, status: str) -> None:
+        """Handle progress updates from worker."""
+        self._progress = progress
+        self._status = status
+        self.progressChanged.emit()
+        self.statusChanged.emit()
+
+    def _on_finished(self, result_path: str) -> None:
+        """Handle preprocessing completion."""
+        self._is_processing = False
+        self.isProcessingChanged.emit()
+        self._result_path = result_path
+        self.resultPathChanged.emit()
+        self._status = "Complete!" if result_path else "Skipped (already exists)"
+        self.statusChanged.emit()
+        self.preprocessingFinished.emit(result_path)
+        self._worker = None
+
+    def _on_error(self, error: str) -> None:
+        """Handle preprocessing errors."""
+        self._is_processing = False
+        self.isProcessingChanged.emit()
+        self._status = f"Error: {error}"
+        self.statusChanged.emit()
+        self.errorOccurred.emit(error)
+        self._worker = None
+
+
+class AppController(QObject):
+    """Main application controller exposed to QML."""
+
+    slidePathChanged = Signal()
+    scaleChanged = Signal()
+    viewportChanged = Signal()
+    errorOccurred = Signal(str)  # Error message signal for QML
+
+    def __init__(
+        self,
+        slide_manager: SlideManager,
+        annotation_manager: AnnotationManager,
+        plugin_manager: AIPluginManager,
+        rust_scheduler: RustTileScheduler,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._slide_manager = slide_manager
+        self._annotation_manager = annotation_manager
+        self._plugin_manager = plugin_manager
+        self._rust_scheduler = rust_scheduler
+        self._tile_model = TileModel(self)
+        self._fallback_tile_model = TileModel(self)
+        self._recent_files = RecentFilesModel(self)
+        self._previous_level = -1
+        self._current_path = ""
+        self._scale = 1.0
+        self._viewport_x = 0.0
+        self._viewport_y = 0.0
+        self._viewport_width = 0.0
+        self._viewport_height = 0.0
+        # Velocity tracking for prefetching
+        self._velocity_x = 0.0
+        self._velocity_y = 0.0
+        # Race condition protection for slide loading
+        self._loading = False
+        self._loading_lock = threading.Lock()
+        # Initial render flag - skip cache filtering on first render after load
+        self._needs_initial_render = False
+        # Multi-slide navigation
+        self._navigator = SlideNavigator(self)
+
+        # Connect signals
+        self._slide_manager.slideLoaded.connect(self._on_slide_loaded)
+        self._slide_manager.slideClosed.connect(self._on_slide_closed)
+
+    @Property(QObject, constant=True)
+    def slideManager(self) -> SlideManager:
+        """Access to the slide manager."""
+        return self._slide_manager
+
+    @Property(QObject, constant=True)
+    def annotationManager(self) -> AnnotationManager:
+        """Access to the annotation manager."""
+        return self._annotation_manager
+
+    @Property(QObject, constant=True)
+    def pluginManager(self) -> AIPluginManager:
+        """Access to the AI plugin manager."""
+        return self._plugin_manager
+
+    @Property(QObject, constant=True)
+    def tileModel(self) -> TileModel:
+        """Model for visible tiles."""
+        return self._tile_model
+
+    @Property(QObject, constant=True)
+    def fallbackTileModel(self) -> TileModel:
+        """Model for fallback tiles (shown during zoom transitions)."""
+        return self._fallback_tile_model
+
+    @Property(QObject, constant=True)
+    def recentFiles(self) -> RecentFilesModel:
+        """Model for recent files."""
+        return self._recent_files
+
+    @Property(QObject, constant=True)
+    def navigator(self) -> SlideNavigator:
+        """Multi-slide navigator."""
+        return self._navigator
+
+    @Property(str, notify=slidePathChanged)
+    def currentPath(self) -> str:
+        """Current slide path."""
+        return self._current_path
+
+    @Property(float, notify=scaleChanged)
+    def scale(self) -> float:
+        """Current view scale."""
+        return self._scale
+
+    @scale.setter
+    def scale(self, value: float) -> None:
+        if self._scale != value:
+            self._scale = value
+            self.scaleChanged.emit()
+            self._update_tiles()
+
+    @Slot(str, result=bool)
+    def openSlide(self, path: str) -> bool:
+        """Open a slide from path.
+
+        Includes race condition protection and comprehensive error handling.
+        """
+        # Race condition protection - prevent concurrent loads
+        with self._loading_lock:
+            if self._loading:
+                logger.warning("Slide load already in progress, ignoring request")
+                return False
+            self._loading = True
+
+        try:
+            # Handle file:// URLs
+            if path.startswith("file:///"):
+                path = path[8:]  # Remove file:///
+            elif path.startswith("file://"):
+                path = path[7:]
+
+            # Normalize path
+            resolved = Path(path).resolve()
+
+            if not resolved.exists():
+                logger.error("Slide not found: %s", resolved)
+                self.errorOccurred.emit(f"File not found: {resolved}")
+                return False
+
+            # Load with Rust scheduler FIRST (for tile loading)
+            # This must happen before SlideManager.load() which emits slideLoaded signal
+            self._rust_scheduler.load(str(resolved))
+
+            # Pre-warm cache with low-resolution tiles for any initial zoom
+            # This must complete BEFORE QML starts requesting tiles
+            self._rust_scheduler.prefetch_low_res_levels()
+
+            # Load with SlideManager (for metadata access in QML)
+            # This emits slideLoaded signal which triggers QML to request tiles
+            if not self._slide_manager.load(str(resolved)):
+                self._rust_scheduler.close()
+                self.errorOccurred.emit("Failed to load slide metadata")
+                return False
+
+            logger.info("Slide loaded: %s", resolved)
+
+            self._current_path = str(resolved)
+            self.slidePathChanged.emit()
+            self._recent_files.addFile(str(resolved), resolved.name)
+            self._navigator.scanDirectory(str(resolved))
+            return True
+
+        except Exception as e:
+            logger.exception("Error opening slide: %s", path)
+            self.errorOccurred.emit(str(e))
+            return False
+        finally:
+            self._loading = False
+
+    @Slot()
+    def closeSlide(self) -> None:
+        """Close the current slide."""
+        self._slide_manager.close()
+        self._rust_scheduler.close()
+        self._current_path = ""
+        self.slidePathChanged.emit()
+        self._tile_model.clear()
+        self._fallback_tile_model.clear()
+        self._previous_level = -1
+
+    @Slot(result=bool)
+    def openNextSlide(self) -> bool:
+        """Open the next slide in the directory."""
+        path = self._navigator.nextSlide()
+        return self.openSlide(path) if path else False
+
+    @Slot(result=bool)
+    def openPreviousSlide(self) -> bool:
+        """Open the previous slide in the directory."""
+        path = self._navigator.previousSlide()
+        return self.openSlide(path) if path else False
+
+    @Slot(float, float, float, float, float)
+    def updateViewport(
+        self, x: float, y: float, width: float, height: float, scale: float
+    ) -> None:
+        """Update the viewport and refresh visible tiles (without velocity)."""
+        self.updateViewportWithVelocity(x, y, width, height, scale, 0.0, 0.0)
+
+    @Slot(float, float, float, float, float, float, float)
+    def updateViewportWithVelocity(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        scale: float,
+        velocity_x: float,
+        velocity_y: float,
+    ) -> None:
+        """Update the viewport with velocity for prefetching.
+
+        Args:
+            x: Viewport left in slide coordinates
+            y: Viewport top in slide coordinates
+            width: Viewport width in slide coordinates
+            height: Viewport height in slide coordinates
+            scale: Current view scale
+            velocity_x: Horizontal pan velocity (pixels/second)
+            velocity_y: Vertical pan velocity (pixels/second)
+        """
+        self._viewport_x = x
+        self._viewport_y = y
+        self._viewport_width = width
+        self._viewport_height = height
+        self._scale = scale
+        self._velocity_x = velocity_x
+        self._velocity_y = velocity_y
+
+        # Notify Rust scheduler for prefetching
+        if self._rust_scheduler.is_loaded:
+            self._rust_scheduler.update_viewport(
+                x, y, width, height, scale, velocity_x, velocity_y
+            )
+
+        self._update_tiles()
+        self.viewportChanged.emit()
+
+    def _update_tiles(self) -> None:
+        """Update the tile model with visible tiles."""
+        if not self._slide_manager.isLoaded:
+            self._tile_model.clear()
+            self._fallback_tile_model.clear()
+            return
+
+        # Get visible tile coordinates
+        tile_coords = self._slide_manager.getVisibleTiles(
+            self._viewport_x,
+            self._viewport_y,
+            self._viewport_width,
+            self._viewport_height,
+            self._scale,
+        )
+        logger.info(
+            "_update_tiles: scale=%.4f level=%d viewport=(%.0f,%.0f,%.0f,%.0f) tiles=%d",
+            self._scale,
+            self._slide_manager.getLevelForScale(self._scale),
+            self._viewport_x, self._viewport_y,
+            self._viewport_width, self._viewport_height,
+            len(tile_coords)
+        )
+
+        # On first render, show all visible tiles (don't filter to cached-only)
+        # Only consume the flag if we actually have tiles to render
+        if self._needs_initial_render:
+            if tile_coords:
+                cached_coords = tile_coords  # Don't filter - let provider load them
+                self._needs_initial_render = False
+            else:
+                # Viewport not ready yet, keep flag for next update
+                cached_coords = []
+        elif self._rust_scheduler.is_loaded:
+            # Filter to only show tiles that are already cached
+            # This prevents flickering - fallback layer shows previous tiles for uncached regions
+            tile_tuples = [tuple(coord) for coord in tile_coords]
+            cached_coords = self._rust_scheduler.filter_cached_tiles(tile_tuples)
+
+            # If most tiles are uncached (>70%), show all and let provider load them
+            # This avoids prolonged gray screen at low zoom levels
+            if tile_coords and len(cached_coords) < len(tile_coords) * 0.3:
+                cached_coords = tile_coords
+        else:
+            cached_coords = tile_coords
+
+        # Build tile data for cached tiles only
+        tiles = []
+        for coord in cached_coords:
+            level, col, row = coord
+            pos = self._slide_manager.getTilePosition(level, col, row)
+            source = f"image://tiles/{level}/{col}_{row}"
+            tiles.append({
+                "level": level,
+                "col": col,
+                "row": row,
+                "x": pos[0],
+                "y": pos[1],
+                "width": pos[2],
+                "height": pos[3],
+                "source": source,
+            })
+
+        # Only update fallback on level change (not during panning)
+        current_level = self._slide_manager.getLevelForScale(self._scale)
+        if current_level != self._previous_level:
+            if self._tile_model.hasTiles():
+                self._fallback_tile_model.batchUpdate(self._tile_model.getTiles())
+            self._previous_level = current_level
+
+        # Use batch update for main model (single signal instead of per-tile)
+        self._tile_model.batchUpdate(tiles)
+
+    def _on_slide_loaded(self) -> None:
+        """Handle slide loaded signal."""
+        # Reset viewport to show whole slide
+        self._scale = 0.1
+        self._viewport_x = 0
+        self._viewport_y = 0
+        self._needs_initial_render = True
+        logger.info(
+            "Slide loaded - initial scale=%.4f, level=%d",
+            self._scale,
+            self._slide_manager.getLevelForScale(self._scale)
+        )
+        self.scaleChanged.emit()
+
+    def _on_slide_closed(self) -> None:
+        """Handle slide closed signal."""
+        self._tile_model.clear()
+        self._fallback_tile_model.clear()
+        self._previous_level = -1
+
+
+def run_app(args: list[str] | None = None) -> int:
+    """Run the FastPATH viewer application.
+
+    Args:
+        args: Command line arguments (defaults to sys.argv)
+
+    Returns:
+        Exit code
+    """
+    if args is None:
+        args = sys.argv
+
+    # Use Fusion style for consistent cross-platform appearance and full customization support
+    QQuickStyle.setStyle("Fusion")
+
+    app = QGuiApplication(args)
+    app.setApplicationName("FastPATH")
+    app.setOrganizationName("FastPATH")
+    app.setOrganizationDomain("fastpath.local")
+
+    # Create managers
+    slide_manager = SlideManager()
+    annotation_manager = AnnotationManager()
+    plugin_manager = AIPluginManager()
+
+    # Create Rust scheduler with configured cache and prefetch settings
+    rust_scheduler = RustTileScheduler(
+        cache_size_mb=TILE_CACHE_SIZE_MB, prefetch_distance=PREFETCH_DISTANCE
+    )
+    logger.info("Rust tile scheduler initialized")
+
+    # Discover AI plugins
+    plugin_manager.discoverPlugins()
+
+    controller = AppController(
+        slide_manager, annotation_manager, plugin_manager, rust_scheduler
+    )
+    preprocess_controller = PreprocessController()
+
+    # Create QML engine
+    engine = QQmlApplicationEngine()
+
+    # Register image providers
+    engine.addImageProvider("tiles", TileImageProvider(rust_scheduler))
+    engine.addImageProvider("thumbnail", ThumbnailProvider(slide_manager))
+
+    # Expose objects to QML
+    engine.rootContext().setContextProperty("App", controller)
+    engine.rootContext().setContextProperty("Preprocess", preprocess_controller)
+    engine.rootContext().setContextProperty("SlideManager", slide_manager)
+    engine.rootContext().setContextProperty("AnnotationManager", annotation_manager)
+    engine.rootContext().setContextProperty("PluginManager", plugin_manager)
+    engine.rootContext().setContextProperty("Navigator", controller.navigator)
+
+    # Load QML
+    qml_dir = Path(__file__).parent / "qml"
+    engine.load(QUrl.fromLocalFile(str(qml_dir / "main.qml")))
+
+    if not engine.rootObjects():
+        return -1
+
+    # Handle command line slide path
+    if len(args) > 1:
+        slide_path = args[1]
+        controller.openSlide(slide_path)
+
+    return app.exec()
