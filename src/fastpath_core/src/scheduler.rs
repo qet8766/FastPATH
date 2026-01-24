@@ -1,6 +1,14 @@
 //! Tile scheduler with parallel I/O and prefetching.
 
 use std::path::PathBuf;
+
+/// Maximum number of visible tiles to load in a single prefetch batch.
+/// Higher values ensure complete coverage at low zoom, but increase I/O load.
+const MAX_VISIBLE_TILES: usize = 256;
+
+/// Budget for extended (non-visible) prefetch tiles.
+/// These are tiles just outside the viewport for smooth panning.
+const EXTENDED_TILE_BUDGET: usize = 32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -80,19 +88,24 @@ impl TileScheduler {
     }
 
     /// Background worker that processes prefetch requests.
+    ///
+    /// Currently a placeholder for future async prefetching. The worker receives
+    /// viewport updates but actual prefetching is done synchronously in
+    /// `prefetch_for_viewport()` which has access to slide state. This worker
+    /// architecture is preserved to enable future improvements like:
+    /// - Decoupled prefetch timing from UI thread
+    /// - Speculative prefetching based on velocity prediction
+    /// - Background cache warming during idle periods
     fn prefetch_worker(
-        cache: Arc<TileCache>,
+        _cache: Arc<TileCache>,
         rx: Receiver<PrefetchRequest>,
         shutdown: Arc<AtomicBool>,
     ) {
-        // Note: We can't access slide state from here directly due to thread safety.
-        // The prefetch_worker just receives viewport updates; actual prefetching is
-        // triggered from update_viewport which has access to slide state.
         while !shutdown.load(Ordering::Relaxed) {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(_request) => {
-                    // Prefetch requests are now handled in update_viewport_internal
-                    // This worker is kept for potential future async prefetching
+                    // TODO: Implement async prefetching here when slide state
+                    // can be safely accessed from background thread
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -238,15 +251,16 @@ impl TileScheduler {
         );
 
         // Adaptive batch sizing:
-        // - Load ALL visible tiles (up to 256) to avoid gray screen at low zoom
-        // - Then add extended tiles up to a reasonable limit
-        let visible_count = visible_uncached.len().min(256);
-        let extended_budget = 32usize.saturating_sub(visible_count.min(32));
+        // - Load ALL visible tiles (up to MAX_VISIBLE_TILES) to avoid gray screen at low zoom
+        // - Then add extended tiles up to EXTENDED_TILE_BUDGET
+        let visible_count = visible_uncached.len().min(MAX_VISIBLE_TILES);
+        let extended_budget =
+            EXTENDED_TILE_BUDGET.saturating_sub(visible_count.min(EXTENDED_TILE_BUDGET));
 
         let mut tiles_to_load = Vec::with_capacity(visible_count + extended_budget);
 
         // Add all visible tiles first (priority)
-        tiles_to_load.extend(visible_uncached.into_iter().take(256));
+        tiles_to_load.extend(visible_uncached.into_iter().take(MAX_VISIBLE_TILES));
 
         // Add extended tiles that aren't already in the list
         for coord in all_tiles {
@@ -294,6 +308,8 @@ impl TileScheduler {
     /// This ensures any initial viewport zoom has tiles ready.
     /// Prefetches all levels where total_tiles <= MAX_TILES_PER_LEVEL.
     pub fn prefetch_low_res_levels(&self) {
+        // 64 tiles = 8x8 grid, covers levels 3+ for most slides.
+        // Small enough for fast loading, large enough for smooth initial zoom.
         const MAX_TILES_PER_LEVEL: u32 = 64;
 
         let slide = self.slide.read();

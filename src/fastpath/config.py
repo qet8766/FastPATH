@@ -105,3 +105,15 @@ MAX_RECENT_FILES: int = 10
 
 #: Thumbnail maximum dimension
 THUMBNAIL_MAX_SIZE: int = 1024
+
+#: Thumbnail JPEG quality
+THUMBNAIL_JPEG_QUALITY: int = 90
+
+#: Placeholder tile size for loading state
+PLACEHOLDER_TILE_SIZE: int = 256
+
+#: Placeholder tile color (light gray RGB)
+PLACEHOLDER_COLOR: tuple[int, int, int] = (224, 224, 224)
+
+#: RGB bytes per pixel (for stride calculations)
+RGB_BYTES_PER_PIXEL: int = 3

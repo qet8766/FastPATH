@@ -9,12 +9,24 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 from rtree import index
 
 logger = logging.getLogger(__name__)
+
+
+class AnnotationDict(TypedDict):
+    """Dictionary representation of an annotation for QML."""
+
+    id: str
+    type: str
+    coordinates: list[list[float]]
+    label: str
+    color: str
+    notes: str
+    bounds: list[float]
 
 
 class AnnotationType(str, Enum):
@@ -348,17 +360,17 @@ class AnnotationManager(QObject):
             return self._annotation_to_dict(self._annotations[ann_id])
         return None
 
-    def _annotation_to_dict(self, annotation: Annotation) -> dict:
+    def _annotation_to_dict(self, annotation: Annotation) -> AnnotationDict:
         """Convert annotation to dict for QML."""
-        return {
-            "id": annotation.id,
-            "type": annotation.type.value,
-            "coordinates": [list(c) for c in annotation.coordinates],
-            "label": annotation.label,
-            "color": annotation.color,
-            "notes": annotation.notes,
-            "bounds": list(annotation.bounds()),
-        }
+        return AnnotationDict(
+            id=annotation.id,
+            type=annotation.type.value,
+            coordinates=[list(c) for c in annotation.coordinates],
+            label=annotation.label,
+            color=annotation.color,
+            notes=annotation.notes,
+            bounds=list(annotation.bounds()),
+        )
 
     @Slot(str)
     def save(self, path: str) -> None:
@@ -410,7 +422,7 @@ class AnnotationManager(QObject):
                         num = int(annotation.id[4:])
                         max_id_num = max(max_id_num, num)
                     except ValueError:
-                        pass
+                        logger.debug("Non-numeric annotation ID suffix: %s", annotation.id)
             except Exception as e:
                 logger.warning("Failed to parse annotation feature: %s", e)
 

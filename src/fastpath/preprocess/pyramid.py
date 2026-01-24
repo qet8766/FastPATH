@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from fastpath.config import THUMBNAIL_MAX_SIZE, THUMBNAIL_JPEG_QUALITY
 from fastpath.core.types import LevelInfo
 
 logger = logging.getLogger(__name__)
@@ -319,8 +320,8 @@ class VipsPyramidBuilder:
         if progress_callback:
             progress_callback("thumbnail", 0, 1)
         logger.info("Generating thumbnail...")
-        thumb = image.thumbnail_image(1024)
-        thumb.jpegsave(str(pyramid_dir / "thumbnail.jpg"), Q=90)
+        thumb = image.thumbnail_image(THUMBNAIL_MAX_SIZE)
+        thumb.jpegsave(str(pyramid_dir / "thumbnail.jpg"), Q=THUMBNAIL_JPEG_QUALITY)
         logger.debug("Thumbnail generated")
 
         # Generate tile pyramid using dzsave - THE FAST PART

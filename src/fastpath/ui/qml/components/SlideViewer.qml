@@ -106,7 +106,7 @@ Item {
         propagateComposedEvents: true
 
         onWheel: (wheel) => {
-            let zoomFactor = wheel.angleDelta.y > 0 ? 1.2 : (1 / 1.2)
+            let zoomFactor = wheel.angleDelta.y > 0 ? 1.4 : (1 / 1.4)
 
             // Zoom toward mouse position
             let mouseX = wheel.x

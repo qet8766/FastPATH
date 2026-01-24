@@ -140,11 +140,8 @@ class ProjectManager(QObject):
             self.projectLoaded.emit()
             return True
 
-        except json.JSONDecodeError as e:
-            logger.error("Invalid JSON in project file %s: %s", path, e)
-            return False
-        except KeyError as e:
-            logger.error("Missing required key in project file %s: %s", path, e)
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error("Failed to parse project file %s: %s", path, e)
             return False
 
     @Slot(str, result=bool)
@@ -176,7 +173,8 @@ class ProjectManager(QObject):
             self.projectSaved.emit()
             return True
 
-        except OSError:
+        except OSError as e:
+            logger.error("Failed to save project to %s: %s", self._project_path, e)
             return False
 
     @Slot()

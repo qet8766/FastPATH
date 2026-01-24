@@ -104,12 +104,14 @@ uv run python -m fastpath "output/example 1.fastpath"
 | `src/fastpath_core/src/scheduler.rs` | Rust tile scheduler - caching, prefetching, `prefetch_low_res_levels()` |
 | `src/fastpath/preprocess/pyramid.py` | VipsPyramidBuilder for WSI → .fastpath conversion |
 | `src/fastpath/ai/base.py` | AIPlugin ABC - inherit for custom plugins |
+| `tests/conftest.py` | Pytest fixtures including `mock_fastpath_dir` (creates dzsave-format test slides) |
 
 ## Code Conventions
 
-- **Python**: PySide6 (not PyQt6), `pathlib.Path` for file paths
-- **Rust**: PyO3/maturin for Python bindings, rayon for parallelism, DashMap for concurrent cache
+- **Python**: PySide6 (not PyQt6), `pathlib.Path` for file paths, type hints throughout
+- **Rust**: PyO3/maturin for Python bindings, rayon for parallelism, parking_lot for locks, crossbeam for channels
 - **QML**: Use `Theme.qml` singleton for colors/fonts, Fusion style for cross-platform consistency
+- **Signals**: Use Qt signals for cross-component communication (e.g., `slideLoaded`, `errorOccurred`)
 
 ## Testing
 
@@ -132,3 +134,4 @@ uv run python -m fastpath "output/example 1.fastpath"
 - **Tile decode errors**: Rust scheduler logs `[TILE ERROR]` to stderr with path and error details
 - **Prefetch stats**: Watch for `[PREFETCH] Loading N tiles...` and `[PREFETCH] Done: X loaded, Y failed` in stderr
 - **Visual verification**: Use PIL's `ImageGrab.grab()` to capture screenshots during testing
+- **Race conditions**: AppController uses `_loading_lock` to prevent concurrent slide loads

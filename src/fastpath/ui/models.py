@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
@@ -14,6 +15,8 @@ from PySide6.QtCore import (
     Slot,
     Property,
 )
+
+from fastpath.config import MAX_RECENT_FILES
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,7 @@ class TileModel(QAbstractListModel):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._tiles: list[dict] = []
+        self._tiles_key_cache: frozenset[tuple[int, int, int]] | None = None
 
     def hasTiles(self) -> bool:
         """Check if there are any tiles in the model."""
@@ -100,15 +104,15 @@ class TileModel(QAbstractListModel):
         """Atomically replace tiles with single model reset.
 
         This method reduces QML re-renders by emitting a single signal
-        instead of per-tile insert/remove signals.
+        instead of per-tile insert/remove signals. Uses cached frozenset
+        to avoid recomputing tile keys on every update.
 
         Args:
             tiles: List of dicts with keys: level, col, row, x, y, width, height, source
         """
         new_keys = frozenset((t["level"], t["col"], t["row"]) for t in tiles)
-        old_keys = frozenset((t["level"], t["col"], t["row"]) for t in self._tiles)
 
-        if new_keys == old_keys:
+        if new_keys == self._tiles_key_cache:
             return  # Skip - same tiles visible
 
         logger.info("TileModel.batchUpdate: %d tiles (levels: %s)",
@@ -116,6 +120,7 @@ class TileModel(QAbstractListModel):
 
         self.beginResetModel()
         self._tiles = list(tiles)
+        self._tiles_key_cache = new_keys
         self.endResetModel()
 
     @Slot()
@@ -123,6 +128,7 @@ class TileModel(QAbstractListModel):
         """Clear all tiles."""
         self.beginResetModel()
         self._tiles = []
+        self._tiles_key_cache = None
         self.endResetModel()
 
 
@@ -167,10 +173,10 @@ class RecentFilesModel(QAbstractListModel):
         self._files.insert(0, {"path": path, "name": name})
         self.endInsertRows()
 
-        # Limit to 10 files
-        if len(self._files) > 10:
-            self.beginRemoveRows(QModelIndex(), 10, len(self._files) - 1)
-            self._files = self._files[:10]
+        # Limit to max recent files
+        if len(self._files) > MAX_RECENT_FILES:
+            self.beginRemoveRows(QModelIndex(), MAX_RECENT_FILES, len(self._files) - 1)
+            self._files = self._files[:MAX_RECENT_FILES]
             self.endRemoveRows()
 
     @Slot()
@@ -179,3 +185,133 @@ class RecentFilesModel(QAbstractListModel):
         self.beginResetModel()
         self._files = []
         self.endResetModel()
+
+
+class FileListModel(QAbstractListModel):
+    """Model for batch preprocessing file list with status and progress.
+
+    Each file entry tracks:
+    - fileName: Display name of the file
+    - filePath: Full path to the file
+    - status: pending | processing | done | skipped | error
+    - progress: 0.0-1.0 progress value
+    - errorMessage: Error details if status is 'error'
+    """
+
+    FileNameRole = Qt.ItemDataRole.UserRole + 1
+    FilePathRole = Qt.ItemDataRole.UserRole + 2
+    StatusRole = Qt.ItemDataRole.UserRole + 3
+    ProgressRole = Qt.ItemDataRole.UserRole + 4
+    ErrorMessageRole = Qt.ItemDataRole.UserRole + 5
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._files: list[dict] = []
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._files)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+        if not index.isValid() or index.row() >= len(self._files):
+            return None
+
+        file = self._files[index.row()]
+        if role == self.FileNameRole:
+            return file["fileName"]
+        elif role == self.FilePathRole:
+            return file["filePath"]
+        elif role == self.StatusRole:
+            return file["status"]
+        elif role == self.ProgressRole:
+            return file["progress"]
+        elif role == self.ErrorMessageRole:
+            return file.get("errorMessage", "")
+        return None
+
+    def roleNames(self) -> dict:
+        return {
+            self.FileNameRole: b"fileName",
+            self.FilePathRole: b"filePath",
+            self.StatusRole: b"status",
+            self.ProgressRole: b"progress",
+            self.ErrorMessageRole: b"errorMessage",
+        }
+
+    @Slot(list)
+    def setFiles(self, files: list) -> None:
+        """Set the file list from list of paths.
+
+        Args:
+            files: List of file path strings
+        """
+        self.beginResetModel()
+        self._files = [
+            {
+                "fileName": Path(f).name,
+                "filePath": f,
+                "status": "pending",
+                "progress": 0.0,
+                "errorMessage": "",
+            }
+            for f in files
+        ]
+        self.endResetModel()
+
+    @Slot(int, str)
+    def setStatus(self, index: int, status: str) -> None:
+        """Update the status of a file.
+
+        Args:
+            index: File index in the list
+            status: New status (pending, processing, done, skipped, error)
+        """
+        if 0 <= index < len(self._files):
+            self._files[index]["status"] = status
+            model_index = self.index(index, 0)
+            self.dataChanged.emit(model_index, model_index, [self.StatusRole])
+
+    @Slot(int, float)
+    def setProgress(self, index: int, progress: float) -> None:
+        """Update the progress of a file.
+
+        Args:
+            index: File index in the list
+            progress: Progress value (0.0-1.0)
+        """
+        if 0 <= index < len(self._files):
+            self._files[index]["progress"] = progress
+            model_index = self.index(index, 0)
+            self.dataChanged.emit(model_index, model_index, [self.ProgressRole])
+
+    @Slot(int, str)
+    def setError(self, index: int, message: str) -> None:
+        """Set error status and message for a file.
+
+        Args:
+            index: File index in the list
+            message: Error message
+        """
+        if 0 <= index < len(self._files):
+            self._files[index]["status"] = "error"
+            self._files[index]["errorMessage"] = message
+            model_index = self.index(index, 0)
+            self.dataChanged.emit(
+                model_index, model_index, [self.StatusRole, self.ErrorMessageRole]
+            )
+
+    @Slot()
+    def clear(self) -> None:
+        """Clear the file list."""
+        self.beginResetModel()
+        self._files = []
+        self.endResetModel()
+
+    def getFilePath(self, index: int) -> str:
+        """Get the file path at the given index."""
+        if 0 <= index < len(self._files):
+            return self._files[index]["filePath"]
+        return ""
+
+    def getFiles(self) -> list[str]:
+        """Get all file paths."""
+        return [f["filePath"] for f in self._files]

@@ -111,8 +111,8 @@ class AIPluginManager(QObject):
         for name in list(self._loaded_models):
             try:
                 self._plugins[name].unload_model()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to unload model %s during cleanup: %s", name, e)
         self._loaded_models.clear()
         self._cleaned_up = True
 

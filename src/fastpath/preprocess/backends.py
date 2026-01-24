@@ -106,10 +106,11 @@ class VIPSBackend:
         Returns:
             numpy array (H, W, 3) RGB uint8
         """
-        # Ensure RGB format
+        # Ensure RGB format (3 bands)
         if img.bands == 4:
             img = img.extract_band(0, n=3)
         elif img.bands == 1:
+            # Grayscale to RGB: bandjoin joins self + list, so [img, img] gives 3 bands
             img = img.bandjoin([img, img])
 
         # Convert to numpy
@@ -286,5 +287,6 @@ def set_vips_concurrency(num_threads: int) -> None:
     if not _HAS_VIPS:
         raise RuntimeError("PyVIPS is not available")
 
-    pyvips.cache_set_max(1000)  # 1GB cache for intermediate pyramid operations
+    # cache_set_max sets max number of operations to cache (not memory size)
+    pyvips.cache_set_max(1000)
     os.environ["VIPS_CONCURRENCY"] = str(num_threads)

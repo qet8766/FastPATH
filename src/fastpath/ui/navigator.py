@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
+
+logger = logging.getLogger(__name__)
 
 
 class SlideNavigator(QObject):
@@ -51,18 +54,25 @@ class SlideNavigator(QObject):
         try:
             self._current_index = self._slides.index(slide_path)
         except ValueError:
+            logger.warning("Slide path not found in directory: %s", slide_path)
             self._current_index = 0 if self._slides else -1
 
         self.slideListChanged.emit()
         self.currentIndexChanged.emit()
 
+    def _ensure_valid_index(self) -> bool:
+        """Ensure current index is valid. Returns False if no slides available."""
+        if not self._slides:
+            return False
+        # Clamp index to valid range
+        self._current_index = max(0, min(self._current_index, len(self._slides) - 1))
+        return True
+
     @Slot(result=str)
     def nextSlide(self) -> str:
-        # Bounds check in case _slides was modified by scanDirectory()
-        if not self._slides:
+        """Navigate to the next slide in the directory."""
+        if not self._ensure_valid_index():
             return ""
-        # Clamp index to valid range before incrementing
-        self._current_index = min(self._current_index, len(self._slides) - 1)
         if self._current_index < len(self._slides) - 1:
             self._current_index += 1
             self.currentIndexChanged.emit()
@@ -71,11 +81,9 @@ class SlideNavigator(QObject):
 
     @Slot(result=str)
     def previousSlide(self) -> str:
-        # Bounds check in case _slides was modified by scanDirectory()
-        if not self._slides:
+        """Navigate to the previous slide in the directory."""
+        if not self._ensure_valid_index():
             return ""
-        # Clamp index to valid range before decrementing
-        self._current_index = min(self._current_index, len(self._slides) - 1)
         if self._current_index > 0:
             self._current_index -= 1
             self.currentIndexChanged.emit()

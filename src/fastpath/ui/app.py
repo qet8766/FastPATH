@@ -13,12 +13,29 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
 from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE
+
+# Threshold for cache miss ratio - if more than this fraction of tiles are uncached,
+# show all tiles immediately rather than waiting for cache (avoids gray screen)
+CACHE_MISS_THRESHOLD = 0.3
+
+
+def _normalize_file_url(path: str) -> str:
+    """Convert file:// URL to local filesystem path.
+
+    Handles both file:/// (Windows) and file:// (Unix) prefixes.
+    """
+    if path.startswith("file:///"):
+        return path[8:]
+    elif path.startswith("file://"):
+        return path[7:]
+    return path
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
 from fastpath.ai.manager import AIPluginManager
 from fastpath.ui.providers import TileImageProvider, ThumbnailProvider
-from fastpath.ui.models import TileModel, RecentFilesModel
+from fastpath.ui.models import TileModel, RecentFilesModel, FileListModel
 from fastpath.ui.navigator import SlideNavigator
+from fastpath.ui.settings import Settings
 from fastpath_core import RustTileScheduler
 
 logger = logging.getLogger(__name__)
@@ -38,6 +55,7 @@ class PreprocessWorker(QThread):
         tile_size: int = 512,
         quality: int = 95,
         method: str = "level1",
+        force: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -46,6 +64,7 @@ class PreprocessWorker(QThread):
         self.tile_size = tile_size
         self.quality = quality
         self.method = method
+        self.force = force
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -95,7 +114,7 @@ class PreprocessWorker(QThread):
                 self.input_path,
                 self.output_dir,
                 progress_callback=progress_callback,
-                force=False,
+                force=self.force,
             )
 
             if self._cancelled:
@@ -112,9 +131,150 @@ class PreprocessWorker(QThread):
             self.errorOccurred.emit(str(e))
 
 
+class BatchPreprocessWorker(QThread):
+    """Background worker for parallel batch preprocessing of multiple slides."""
+
+    fileStatusChanged = Signal(int, str)  # index, status (pending/processing/done/skipped/error)
+    fileProgress = Signal(int, float)  # index, progress (0-1)
+    overallProgress = Signal(float)  # overall progress (0-1)
+    allFinished = Signal(int, int, int, list)  # processed, skipped, errors, error_details
+
+    def __init__(
+        self,
+        files: list[str],
+        output_dir: str,
+        tile_size: int = 512,
+        quality: int = 95,
+        method: str = "level1",
+        force: bool = False,
+        parallel_workers: int = 3,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._files = files
+        self._output_dir = Path(output_dir)
+        self._tile_size = tile_size
+        self._quality = quality
+        self._method = method
+        self._force = force
+        self._parallel = parallel_workers
+        self._cancelled = False
+        self._completed_count = 0
+        self._lock = threading.Lock()
+
+    def cancel(self) -> None:
+        """Request cancellation of batch preprocessing."""
+        self._cancelled = True
+
+    def run(self) -> None:
+        """Run parallel batch preprocessing."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from fastpath.preprocess.pyramid import (
+            VipsPyramidBuilder,
+            check_pyramid_status,
+            PyramidStatus,
+        )
+
+        processed = 0
+        skipped = 0
+        errors = 0
+        error_details: list[tuple[str, str]] = []  # (filename, error_message)
+
+        total_files = len(self._files)
+        if total_files == 0:
+            self.allFinished.emit(0, 0, 0, [])
+            return
+
+        def process_file(index: int, file_path: str) -> tuple[int, str, str | None]:
+            """Process a single file. Returns (index, status, error_message)."""
+            if self._cancelled:
+                return (index, "pending", None)
+
+            self.fileStatusChanged.emit(index, "processing")
+            self.fileProgress.emit(index, 0.0)
+
+            try:
+                slide_path = Path(file_path)
+
+                # Check if already exists
+                pyramid_name = slide_path.stem + ".fastpath"
+                pyramid_dir = self._output_dir / pyramid_name
+                status = check_pyramid_status(pyramid_dir)
+
+                if status == PyramidStatus.COMPLETE and not self._force:
+                    self.fileProgress.emit(index, 1.0)
+                    return (index, "skipped", None)
+
+                # Build pyramid
+                builder = VipsPyramidBuilder(
+                    tile_size=self._tile_size,
+                    jpeg_quality=self._quality,
+                    method=self._method,
+                )
+
+                def progress_cb(stage: str, current: int, total: int) -> None:
+                    if self._cancelled:
+                        raise InterruptedError("Cancelled")
+                    if stage == "dzsave":
+                        self.fileProgress.emit(index, 0.8)
+                    elif stage == "thumbnail":
+                        self.fileProgress.emit(index, 0.1)
+
+                result = builder.build(
+                    slide_path,
+                    self._output_dir,
+                    progress_callback=progress_cb,
+                    force=self._force,
+                )
+
+                self.fileProgress.emit(index, 1.0)
+
+                if result is None:
+                    return (index, "skipped", None)
+                return (index, "done", None)
+
+            except InterruptedError:
+                return (index, "pending", "Cancelled")
+            except Exception as e:
+                logger.exception("Error processing %s", file_path)
+                return (index, "error", str(e))
+
+        # Process files in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self._parallel) as executor:
+            futures = {
+                executor.submit(process_file, i, f): (i, f)
+                for i, f in enumerate(self._files)
+            }
+
+            for future in as_completed(futures):
+                if self._cancelled:
+                    break
+
+                index, status, error_msg = future.result()
+                self.fileStatusChanged.emit(index, status)
+
+                if status == "done":
+                    processed += 1
+                elif status == "skipped":
+                    skipped += 1
+                elif status == "error":
+                    errors += 1
+                    file_name = Path(self._files[index]).name
+                    error_details.append((file_name, error_msg or "Unknown error"))
+
+                # Update overall progress
+                with self._lock:
+                    self._completed_count += 1
+                    overall = self._completed_count / total_files
+                    self.overallProgress.emit(overall)
+
+        self.allFinished.emit(processed, skipped, errors, error_details)
+
+
 class PreprocessController(QObject):
     """Controller for preprocessing mode exposed to QML."""
 
+    # Single file mode signals
     isProcessingChanged = Signal()
     progressChanged = Signal()
     statusChanged = Signal()
@@ -124,8 +284,21 @@ class PreprocessController(QObject):
     errorOccurred = Signal(str)
     preprocessingFinished = Signal(str)  # result path
 
+    # Batch mode signals
+    inputModeChanged = Signal()
+    inputFolderChanged = Signal()
+    overallProgressChanged = Signal()
+    processedCountChanged = Signal()
+    skippedCountChanged = Signal()
+    errorCountChanged = Signal()
+    forceChanged = Signal()
+    parallelWorkersChanged = Signal()
+    batchCompleteChanged = Signal()
+    firstResultPathChanged = Signal()
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        # Single file mode state
         self._is_processing = False
         self._progress = 0.0
         self._status = "Ready"
@@ -133,6 +306,21 @@ class PreprocessController(QObject):
         self._output_dir = ""
         self._result_path = ""
         self._worker: PreprocessWorker | None = None
+
+        # Batch mode state
+        self._input_mode = "single"  # "single" or "folder"
+        self._input_folder = ""
+        self._file_list_model = FileListModel(self)
+        self._batch_worker: BatchPreprocessWorker | None = None
+        self._overall_progress = 0.0
+        self._processed_count = 0
+        self._skipped_count = 0
+        self._error_count = 0
+        self._force = False
+        self._parallel_workers = 3
+        self._batch_complete = False
+        self._first_result_path = ""
+        self._error_details: list[tuple[str, str]] = []
 
         # Settings with defaults
         self._tile_size = 512
@@ -174,27 +362,94 @@ class PreprocessController(QObject):
     def resultPath(self) -> str:
         return self._result_path
 
+    # Batch mode properties
+    @Property(str, notify=inputModeChanged)
+    def inputMode(self) -> str:
+        return self._input_mode
+
+    @inputMode.setter
+    def inputMode(self, value: str) -> None:
+        if self._input_mode != value:
+            self._input_mode = value
+            self.inputModeChanged.emit()
+
+    @Property(str, notify=inputFolderChanged)
+    def inputFolder(self) -> str:
+        return self._input_folder
+
+    @inputFolder.setter
+    def inputFolder(self, value: str) -> None:
+        if self._input_folder != value:
+            self._input_folder = value
+            self.inputFolderChanged.emit()
+
+    @Property(QObject, constant=True)
+    def fileListModel(self) -> FileListModel:
+        return self._file_list_model
+
+    @Property(float, notify=overallProgressChanged)
+    def overallProgress(self) -> float:
+        return self._overall_progress
+
+    @Property(int, notify=processedCountChanged)
+    def processedCount(self) -> int:
+        return self._processed_count
+
+    @Property(int, notify=skippedCountChanged)
+    def skippedCount(self) -> int:
+        return self._skipped_count
+
+    @Property(int, notify=errorCountChanged)
+    def errorCount(self) -> int:
+        return self._error_count
+
+    @Property(bool, notify=forceChanged)
+    def force(self) -> bool:
+        return self._force
+
+    @force.setter
+    def force(self, value: bool) -> None:
+        if self._force != value:
+            self._force = value
+            self.forceChanged.emit()
+
+    @Property(int, notify=parallelWorkersChanged)
+    def parallelWorkers(self) -> int:
+        return self._parallel_workers
+
+    @parallelWorkers.setter
+    def parallelWorkers(self, value: int) -> None:
+        if self._parallel_workers != value:
+            self._parallel_workers = max(1, min(8, value))  # Clamp 1-8
+            self.parallelWorkersChanged.emit()
+
+    @Property(bool, notify=batchCompleteChanged)
+    def batchComplete(self) -> bool:
+        return self._batch_complete
+
+    @Property(str, notify=firstResultPathChanged)
+    def firstResultPath(self) -> str:
+        return self._first_result_path
+
+    @Slot(str)
+    def setInputMode(self, mode: str) -> None:
+        """Set input mode (single or folder)."""
+        self.inputMode = mode
+
     @Slot(str)
     def setInputFile(self, path: str) -> None:
         """Set input file from QML (handles file:// URLs)."""
-        if path.startswith("file:///"):
-            path = path[8:]
-        elif path.startswith("file://"):
-            path = path[7:]
-        self.inputFile = path
+        normalized = _normalize_file_url(path)
+        self.inputFile = normalized
 
         # Auto-set output dir to same directory as input if not set
         if not self._output_dir:
-            self.outputDir = str(Path(path).parent)
+            self.outputDir = str(Path(normalized).parent)
 
     @Slot(str)
     def setOutputDir(self, path: str) -> None:
         """Set output directory from QML (handles file:// URLs)."""
-        if path.startswith("file:///"):
-            path = path[8:]
-        elif path.startswith("file://"):
-            path = path[7:]
-        self.outputDir = path
+        self.outputDir = _normalize_file_url(path)
 
     @Slot(int, int, str)
     def startPreprocess(self, tile_size: int, quality: int, method: str = "level1") -> None:
@@ -239,6 +494,7 @@ class PreprocessController(QObject):
             tile_size,
             quality,
             method,
+            self._force,
             self,
         )
         self._worker.progressChanged.connect(self._on_progress)
@@ -253,6 +509,178 @@ class PreprocessController(QObject):
             self._worker.cancel()
             self._status = "Cancelling..."
             self.statusChanged.emit()
+        if self._batch_worker:
+            self._batch_worker.cancel()
+            self._status = "Cancelling..."
+            self.statusChanged.emit()
+
+    @Slot(str)
+    def setInputFolder(self, path: str) -> None:
+        """Set input folder for batch mode (handles file:// URLs)."""
+        normalized = _normalize_file_url(path)
+        self.inputFolder = normalized
+
+        # Auto-set output dir to same directory if not set
+        if not self._output_dir:
+            self.outputDir = normalized
+
+        # Scan for WSI files
+        self._scan_input_folder()
+
+    def _scan_input_folder(self) -> None:
+        """Scan input folder for WSI files and populate file list model."""
+        if not self._input_folder:
+            self._file_list_model.clear()
+            return
+
+        folder = Path(self._input_folder)
+        if not folder.exists() or not folder.is_dir():
+            self._file_list_model.clear()
+            return
+
+        # Common WSI extensions
+        wsi_extensions = {".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".vms", ".vmu", ".scn"}
+
+        files = []
+        for ext in wsi_extensions:
+            files.extend(folder.glob(f"*{ext}"))
+            files.extend(folder.glob(f"*{ext.upper()}"))
+
+        # Sort by name and remove duplicates
+        unique_files = sorted(set(str(f) for f in files))
+        self._file_list_model.setFiles(unique_files)
+
+    @Slot(bool)
+    def setForce(self, value: bool) -> None:
+        """Set force rebuild flag."""
+        self.force = value
+
+    @Slot(int)
+    def setParallelWorkers(self, value: int) -> None:
+        """Set number of parallel workers (1-8)."""
+        self.parallelWorkers = value
+
+    @Slot(int, int, str)
+    def startBatchPreprocess(self, tile_size: int, quality: int, method: str = "level1") -> None:
+        """Start batch preprocessing of all files in folder.
+
+        Args:
+            tile_size: Tile size in pixels (256, 512, or 1024)
+            quality: JPEG quality (70-100)
+            method: Extraction method
+        """
+        if self._is_processing:
+            return
+
+        files = self._file_list_model.getFiles()
+        if not files:
+            self.errorOccurred.emit("No WSI files found in folder")
+            return
+
+        if not self._output_dir:
+            self.errorOccurred.emit("No output directory selected")
+            return
+
+        # Reset batch state
+        self._is_processing = True
+        self.isProcessingChanged.emit()
+        self._overall_progress = 0.0
+        self.overallProgressChanged.emit()
+        self._processed_count = 0
+        self.processedCountChanged.emit()
+        self._skipped_count = 0
+        self.skippedCountChanged.emit()
+        self._error_count = 0
+        self.errorCountChanged.emit()
+        self._batch_complete = False
+        self.batchCompleteChanged.emit()
+        self._first_result_path = ""
+        self.firstResultPathChanged.emit()
+        self._error_details = []
+        self._status = "Starting batch..."
+        self.statusChanged.emit()
+
+        # Create and start batch worker
+        self._batch_worker = BatchPreprocessWorker(
+            files,
+            self._output_dir,
+            tile_size,
+            quality,
+            method,
+            self._force,
+            self._parallel_workers,
+            self,
+        )
+        self._batch_worker.fileStatusChanged.connect(self._on_batch_file_status)
+        self._batch_worker.fileProgress.connect(self._on_batch_file_progress)
+        self._batch_worker.overallProgress.connect(self._on_batch_overall_progress)
+        self._batch_worker.allFinished.connect(self._on_batch_finished)
+        self._batch_worker.start()
+
+    def _on_batch_file_status(self, index: int, status: str) -> None:
+        """Handle file status update from batch worker."""
+        self._file_list_model.setStatus(index, status)
+        # Track first successful result for "Open in Viewer"
+        if status == "done" and not self._first_result_path:
+            file_path = self._file_list_model.getFilePath(index)
+            if file_path:
+                pyramid_name = Path(file_path).stem + ".fastpath"
+                self._first_result_path = str(Path(self._output_dir) / pyramid_name)
+                self.firstResultPathChanged.emit()
+
+    def _on_batch_file_progress(self, index: int, progress: float) -> None:
+        """Handle file progress update from batch worker."""
+        self._file_list_model.setProgress(index, progress)
+
+    def _on_batch_overall_progress(self, progress: float) -> None:
+        """Handle overall progress update from batch worker."""
+        self._overall_progress = progress
+        self.overallProgressChanged.emit()
+        # Update status with count
+        total = len(self._file_list_model.getFiles())
+        completed = int(progress * total)
+        self._status = f"Processing {completed} of {total} files..."
+        self.statusChanged.emit()
+
+    def _on_batch_finished(
+        self, processed: int, skipped: int, errors: int, error_details: list
+    ) -> None:
+        """Handle batch preprocessing completion."""
+        self._is_processing = False
+        self.isProcessingChanged.emit()
+        self._processed_count = processed
+        self.processedCountChanged.emit()
+        self._skipped_count = skipped
+        self.skippedCountChanged.emit()
+        self._error_count = errors
+        self.errorCountChanged.emit()
+        self._error_details = error_details
+        self._batch_complete = True
+        self.batchCompleteChanged.emit()
+        self._status = "Batch complete!"
+        self.statusChanged.emit()
+        self._batch_worker = None
+
+    @Slot()
+    def resetBatch(self) -> None:
+        """Reset batch state to start a new batch."""
+        self._batch_complete = False
+        self.batchCompleteChanged.emit()
+        self._overall_progress = 0.0
+        self.overallProgressChanged.emit()
+        self._processed_count = 0
+        self.processedCountChanged.emit()
+        self._skipped_count = 0
+        self.skippedCountChanged.emit()
+        self._error_count = 0
+        self.errorCountChanged.emit()
+        self._first_result_path = ""
+        self.firstResultPathChanged.emit()
+        self._file_list_model.clear()
+        self._input_folder = ""
+        self.inputFolderChanged.emit()
+        self._status = "Ready"
+        self.statusChanged.emit()
 
     def _on_progress(self, progress: float, status: str) -> None:
         """Handle progress updates from worker."""
@@ -394,13 +822,8 @@ class AppController(QObject):
             self._loading = True
 
         try:
-            # Handle file:// URLs
-            if path.startswith("file:///"):
-                path = path[8:]  # Remove file:///
-            elif path.startswith("file://"):
-                path = path[7:]
-
-            # Normalize path
+            # Handle file:// URLs and normalize path
+            path = _normalize_file_url(path)
             resolved = Path(path).resolve()
 
             if not resolved.exists():
@@ -546,9 +969,9 @@ class AppController(QObject):
             tile_tuples = [tuple(coord) for coord in tile_coords]
             cached_coords = self._rust_scheduler.filter_cached_tiles(tile_tuples)
 
-            # If most tiles are uncached (>70%), show all and let provider load them
+            # If most tiles are uncached, show all and let provider load them
             # This avoids prolonged gray screen at low zoom levels
-            if tile_coords and len(cached_coords) < len(tile_coords) * 0.3:
+            if tile_coords and len(cached_coords) < len(tile_coords) * CACHE_MISS_THRESHOLD:
                 cached_coords = tile_coords
         else:
             cached_coords = tile_coords
@@ -639,6 +1062,11 @@ def run_app(args: list[str] | None = None) -> int:
         slide_manager, annotation_manager, plugin_manager, rust_scheduler
     )
     preprocess_controller = PreprocessController()
+    settings = Settings()
+
+    # Apply saved settings to preprocess controller
+    if settings.defaultOutputDir:
+        preprocess_controller.outputDir = settings.defaultOutputDir
 
     # Create QML engine
     engine = QQmlApplicationEngine()
@@ -650,6 +1078,7 @@ def run_app(args: list[str] | None = None) -> int:
     # Expose objects to QML
     engine.rootContext().setContextProperty("App", controller)
     engine.rootContext().setContextProperty("Preprocess", preprocess_controller)
+    engine.rootContext().setContextProperty("Settings", settings)
     engine.rootContext().setContextProperty("SlideManager", slide_manager)
     engine.rootContext().setContextProperty("AnnotationManager", annotation_manager)
     engine.rootContext().setContextProperty("PluginManager", plugin_manager)

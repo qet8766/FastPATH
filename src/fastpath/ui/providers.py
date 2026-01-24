@@ -9,6 +9,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtQuick import QQuickImageProvider
 
+from fastpath.config import PLACEHOLDER_TILE_SIZE, PLACEHOLDER_COLOR, RGB_BYTES_PER_PIXEL
 from fastpath_core import RustTileScheduler
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,10 @@ class TileImageProvider(QQuickImageProvider):
 
     def _create_placeholder(self) -> QImage:
         """Create a neutral placeholder image for loading tiles."""
-        size = 256
-        placeholder = QImage(size, size, QImage.Format.Format_RGB888)
-        placeholder.fill(QColor(224, 224, 224))  # Light gray #e0e0e0
+        placeholder = QImage(
+            PLACEHOLDER_TILE_SIZE, PLACEHOLDER_TILE_SIZE, QImage.Format.Format_RGB888
+        )
+        placeholder.fill(QColor(*PLACEHOLDER_COLOR))
         return placeholder
 
     def requestImage(
@@ -73,16 +75,15 @@ class TileImageProvider(QQuickImageProvider):
                     level, col, row, self._rust_scheduler.is_loaded
                 )
                 return self._placeholder
-            else:
-                logger.debug("Tile loaded: level=%d col=%d row=%d", level, col, row)
 
+            logger.debug("Tile loaded: level=%d col=%d row=%d", level, col, row)
             data, width, height = tile_data
             # Convert raw RGB bytes to QImage
             image = QImage(
                 data,
                 width,
                 height,
-                width * 3,  # bytes per line (RGB)
+                width * RGB_BYTES_PER_PIXEL,
                 QImage.Format.Format_RGB888,
             )
             # Make a copy since the data buffer may be reused

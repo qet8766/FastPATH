@@ -389,8 +389,14 @@ class SlideManager(QObject):
                     self._tile_cache[coord] = qimage
 
             return qimage
+        except FileNotFoundError:
+            logger.debug("Tile not found: (%d, %d, %d) at %s", level, col, row, tile_path)
+            return None
+        except OSError as e:
+            logger.warning("I/O error loading tile (%d, %d, %d) from %s: %s", level, col, row, tile_path, e)
+            return None
         except Exception as e:
-            logger.warning("Failed to load tile (%d, %d, %d) from %s: %s", level, col, row, tile_path, e)
+            logger.warning("Unexpected error loading tile (%d, %d, %d) from %s: %s", level, col, row, tile_path, e)
             return None
 
     @Slot(result=str)

@@ -65,14 +65,11 @@ pub fn decode_tile(path: &Path) -> TileResult<TileData> {
     // zune-jpeg outputs RGB by default for color images, grayscale for grayscale
     // Convert grayscale to RGB if needed
     let rgb_data = if info.components == 1 {
-        // Grayscale -> RGB
-        let mut rgb = Vec::with_capacity(pixels.len() * 3);
-        for &gray in &pixels {
-            rgb.push(gray);
-            rgb.push(gray);
-            rgb.push(gray);
-        }
-        rgb
+        // Grayscale -> RGB: duplicate each gray value 3 times
+        pixels
+            .iter()
+            .flat_map(|&gray| [gray, gray, gray])
+            .collect()
     } else {
         pixels
     };
