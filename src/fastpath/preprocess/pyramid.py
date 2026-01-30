@@ -197,12 +197,11 @@ class PyramidMetadata:
 
 
 class VipsPyramidBuilder:
-    """Fast pyramid builder using pyvips dzsave() with OpenSlide level 1.
+    """Fast pyramid builder using pyvips dzsave().
 
-    Uses OpenSlide level 1 directly (~10x magnification) without any resizing,
+    Loads OpenSlide level 0 and resizes to exactly 0.5 MPP (20x equivalent),
     then generates tile pyramid using libvips' native Deep Zoom generator.
-
-    Speedup: ~6x compared to standard OpenSlide + PIL pipeline.
+    Always outputs JPEG Q80.
 
     Requirements:
         - pyvips with OpenSlide support (libvips compiled with openslide)
@@ -212,35 +211,18 @@ class VipsPyramidBuilder:
         - Level 0 in dzsave = lowest resolution (inverted from FastPATH convention)
     """
 
-    def __init__(
-        self,
-        tile_size: int = 512,
-        jpeg_quality: int = 80,
-        target_mpp_override: float | None = None,
-        method: str = "level1",
-    ) -> None:
-        """Initialize the VipsPyramidBuilder.
+    #: Fixed target microns-per-pixel (20x equivalent)
+    TARGET_MPP: float = 0.5
+    #: Fixed JPEG quality
+    JPEG_QUALITY: int = 80
 
-        Args:
-            tile_size: Size of tiles in pixels (default: 512)
-            jpeg_quality: JPEG quality for tiles (default: 80)
-            target_mpp_override: Override MPP value when slide metadata unavailable
-            method: Extraction method - "level1" (extract level 1 directly, ~MPP 1.0)
-                    or "level0_resized" (extract level 0 and resize 2x to ~MPP 0.5)
-        """
+    def __init__(self, tile_size: int = 512) -> None:
         if not _HAS_VIPS_OPENSLIDE:
             raise RuntimeError(
                 "VipsPyramidBuilder requires pyvips with OpenSlide support. "
                 "Install libvips with OpenSlide enabled."
             )
-
-        if method not in ("level1", "level0_resized"):
-            raise ValueError(f"method must be 'level1' or 'level0_resized', got '{method}'")
-
         self.tile_size = tile_size
-        self.jpeg_quality = jpeg_quality
-        self.target_mpp_override = target_mpp_override
-        self.method = method
 
     def build(
         self,
@@ -292,27 +274,28 @@ class VipsPyramidBuilder:
         annotations_dir = pyramid_dir / "annotations"
         annotations_dir.mkdir()
 
-        # Load slide based on selected method
-        if self.method == "level1":
-            # Method A: Extract level 1 directly (~MPP 1.0, ~10x)
-            logger.info("Loading slide level 1 with pyvips...")
-            image = pyvips.Image.openslideload(str(slide_path), level=1)
-            logger.info("Loaded %s: %d x %d px", slide_path.name, image.width, image.height)
-            source_mpp = self._get_mpp_at_level(slide_path, level=1)
-        else:  # method == "level0_resized"
-            # Method B: Extract level 0 (~MPP 0.25), resize 2x to get MPP 0.5
-            logger.info("Loading slide level 0 with pyvips...")
-            image = pyvips.Image.openslideload(str(slide_path), level=0)
-            base_mpp = self._get_mpp_at_level(slide_path, level=0)
-            logger.info("Loaded %s: %d x %d px", slide_path.name, image.width, image.height)
+        # Load level 0 (highest resolution) and resize to 0.5 MPP
+        logger.info("Loading slide level 0 with pyvips...")
+        image = pyvips.Image.openslideload(str(slide_path), level=0)
+        base_mpp = self._get_base_mpp(slide_path)
+        logger.info("Loaded %s: %d x %d px (MPP %.4f)", slide_path.name, image.width, image.height, base_mpp)
 
-            # Resize 2x (halve dimensions) to get MPP 0.5
-            logger.info("Resizing 2x for MPP 0.5...")
-            image = image.resize(0.5, vscale=0.5, kernel="lanczos3")
-            source_mpp = base_mpp * 2  # MPP doubles when dimensions halve
+        if base_mpp < self.TARGET_MPP:
+            resize_factor = base_mpp / self.TARGET_MPP
+            logger.info("Resizing by %.3f for %.1f MPP...", resize_factor, self.TARGET_MPP)
+            image = image.resize(resize_factor, vscale=resize_factor, kernel="lanczos3")
+            actual_mpp = self.TARGET_MPP
             logger.info("Resized to %d x %d px", image.width, image.height)
+        elif base_mpp > self.TARGET_MPP:
+            logger.warning(
+                "Source MPP %.3f is coarser than target %.1f — using source resolution as-is",
+                base_mpp, self.TARGET_MPP,
+            )
+            actual_mpp = base_mpp
+        else:
+            actual_mpp = base_mpp
 
-        actual_mag = 10.0 / source_mpp if source_mpp > 0 else 10.0
+        actual_mag = 10.0 / actual_mpp if actual_mpp > 0 else 10.0
 
         dimensions = (image.width, image.height)
 
@@ -334,7 +317,7 @@ class VipsPyramidBuilder:
             str(pyramid_dir / "tiles"),
             tile_size=self.tile_size,
             overlap=0,
-            suffix=f".jpg[Q={self.jpeg_quality},interlace]",  # Progressive JPEG
+            suffix=f".jpg[Q={self.JPEG_QUALITY},interlace]",  # Progressive JPEG Q80
             depth="onetile",  # Stop when tile fits in one tile
             layout="dz",  # Deep Zoom layout: tiles_files/level/col_row.jpg
             strip=True,  # Remove metadata for smaller/faster tiles
@@ -344,13 +327,13 @@ class VipsPyramidBuilder:
         # Read dzsave output to calculate level info
         levels = self._calculate_levels_from_dzsave(pyramid_dir / "tiles_files")
 
-        # Write metadata - use actual values from level 1
+        # Write metadata
         metadata = PyramidMetadata(
             version="1.0",
             source_file=slide_path.name,
-            source_mpp=source_mpp,
-            target_mpp=source_mpp,  # Actual MPP at level 1
-            target_magnification=actual_mag,  # Actual magnification at level 1
+            source_mpp=base_mpp,
+            target_mpp=actual_mpp,
+            target_magnification=actual_mag,
             tile_size=self.tile_size,
             dimensions=dimensions,
             levels=levels,
@@ -374,60 +357,30 @@ class VipsPyramidBuilder:
         logger.info("Generated %d pyramid levels for %s", len(levels), slide_path.name)
         return pyramid_dir
 
-    def _get_mpp_at_level(self, slide_path: Path, level: int) -> float:
-        """Get microns-per-pixel at a specific OpenSlide level.
-
-        Args:
-            slide_path: Path to the slide file
-            level: OpenSlide level index
+    def _get_base_mpp(self, slide_path: Path) -> float:
+        """Get microns-per-pixel at level 0 from slide metadata.
 
         Returns:
-            MPP value at that level, or target_mpp_override, or 1.0 as default (~10x)
+            Base MPP value, or 0.25 as fallback (assumes 40x).
         """
         try:
             image = pyvips.Image.openslideload(str(slide_path), level=0)
 
-            # Get base MPP from level 0
-            base_mpp = None
-            try:
-                mpp_x = image.get("openslide.mpp-x")
-                if mpp_x:
-                    base_mpp = float(mpp_x)
-            except (ValueError, TypeError, KeyError):
-                pass  # Metadata missing or invalid format
-            except pyvips.error.Error:
-                pass  # pyvips couldn't read the metadata
-
-            if base_mpp is None:
+            for field in ("openslide.mpp-x", "aperio.MPP"):
                 try:
-                    mpp = image.get("aperio.MPP")
-                    if mpp:
-                        base_mpp = float(mpp)
-                except (ValueError, TypeError, KeyError):
-                    pass  # Metadata missing or invalid format
-                except pyvips.error.Error:
-                    pass  # pyvips couldn't read the metadata
+                    value = image.get(field)
+                    if value:
+                        return float(value)
+                except (ValueError, TypeError, KeyError, pyvips.error.Error):
+                    continue
 
-            if base_mpp is None:
-                # No MPP metadata - use override or default
-                if self.target_mpp_override is not None:
-                    return self.target_mpp_override
-                return 1.0  # Default ~10x
+            # No MPP metadata — assume 40x (0.25 MPP)
+            logger.warning("No MPP metadata in %s, assuming 40x (0.25 MPP)", slide_path.name)
+            return 0.25
 
-            # Get downsample factor for the requested level
-            downsample = float(image.get(f"openslide.level[{level}].downsample"))
-            return base_mpp * downsample
-
-        except (OSError, ValueError, TypeError, KeyError):
-            # File I/O error or invalid metadata
-            if self.target_mpp_override is not None:
-                return self.target_mpp_override
-            return 1.0
-        except pyvips.error.Error:
-            # pyvips-specific error (e.g., unsupported format)
-            if self.target_mpp_override is not None:
-                return self.target_mpp_override
-            return 1.0
+        except (OSError, pyvips.error.Error):
+            logger.warning("Cannot read MPP from %s, assuming 40x (0.25 MPP)", slide_path.name)
+            return 0.25
 
     def _calculate_levels_from_dzsave(self, dzsave_dir: Path) -> list[LevelInfo]:
         """Calculate level info from dzsave output.
@@ -496,20 +449,17 @@ def build_pyramid(
     slide_path: Path,
     output_dir: Path,
     tile_size: int = 512,
-    jpeg_quality: int = 80,
     progress_callback: Callable[[str, int, int], None] | None = None,
     force: bool = False,
 ) -> Path | None:
     """Build a tile pyramid using VipsPyramidBuilder.
 
-    Uses OpenSlide level 1 (~10x) directly with pyvips dzsave() for fast
-    preprocessing.
+    Always produces 0.5 MPP, JPEG Q80.
 
     Args:
         slide_path: Path to WSI file
         output_dir: Output directory
         tile_size: Tile size in pixels
-        jpeg_quality: JPEG quality (1-100)
         progress_callback: Progress callback function
         force: Force rebuild even if already complete
 
@@ -519,8 +469,5 @@ def build_pyramid(
     Raises:
         RuntimeError: If pyvips with OpenSlide support is not available
     """
-    builder = VipsPyramidBuilder(
-        tile_size=tile_size,
-        jpeg_quality=jpeg_quality,
-    )
+    builder = VipsPyramidBuilder(tile_size=tile_size)
     return builder.build(slide_path, output_dir, progress_callback, force=force)

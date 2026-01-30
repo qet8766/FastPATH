@@ -15,19 +15,17 @@ def process_single_slide(
     slide_path: Path,
     output_dir: Path,
     tile_size: int,
-    quality: int,
     force: bool = False,
-    target_mpp: float | None = None,
 ) -> tuple[Path | None, str | None, bool]:
     """Process a single slide.
+
+    Always produces 0.5 MPP, JPEG Q80.
 
     Args:
         slide_path: Path to the WSI file
         output_dir: Output directory
         tile_size: Tile size in pixels
-        quality: JPEG quality
         force: Force rebuild
-        target_mpp: Override MPP value (used when slide metadata unavailable)
 
     Returns:
         Tuple of (result_path, error_message, was_skipped)
@@ -36,11 +34,7 @@ def process_single_slide(
         - was_skipped: True if slide was skipped (already complete)
     """
     try:
-        builder = VipsPyramidBuilder(
-            tile_size=tile_size,
-            jpeg_quality=quality,
-            target_mpp_override=target_mpp,
-        )
+        builder = VipsPyramidBuilder(tile_size=tile_size)
         result = builder.build(slide_path, output_dir, force=force)
         if result is None:
             # Slide was skipped (already complete)

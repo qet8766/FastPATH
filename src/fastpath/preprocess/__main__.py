@@ -64,19 +64,6 @@ def find_wsi_files(path: Path) -> list[Path]:
     help="Tile size in pixels (default: 512, range: 64-2048)",
 )
 @click.option(
-    "--quality",
-    "-q",
-    type=click.IntRange(1, 100),
-    default=80,
-    help="JPEG quality 1-100 (default: 80)",
-)
-@click.option(
-    "--target-mpp",
-    type=float,
-    default=None,
-    help="Override target microns-per-pixel (default: auto-detect from slide, fallback 1.0)",
-)
-@click.option(
     "--parallel-slides",
     "-p",
     type=int,
@@ -93,8 +80,6 @@ def main(
     input_path: str,
     output: str,
     tile_size: int,
-    quality: int,
-    target_mpp: float | None,
     parallel_slides: int,
     force: bool,
 ) -> None:
@@ -103,7 +88,7 @@ def main(
     INPUT_PATH can be a single WSI file or a directory containing WSI files.
     Supported formats: SVS, NDPI, TIF, TIFF, MRXS, VMS, VMU, SCN.
 
-    Uses pyvips dzsave with OpenSlide level 1 (~10x) for fast preprocessing.
+    Always produces 0.5 MPP (20x equivalent), JPEG Q80, using pyvips dzsave.
 
     Examples:
 
@@ -138,8 +123,7 @@ def main(
     click.echo(click.style("=" * 40, fg="cyan"))
     click.echo(f"Found {len(wsi_files)} WSI file(s)")
     click.echo(f"Output directory: {output_dir}")
-    click.echo(f"Tile size: {tile_size}px")
-    click.echo(f"Tile format: JPEG (quality {quality})")
+    click.echo(f"Tile size: {tile_size}px | Target: 0.5 MPP | JPEG Q80")
     if force:
         click.echo(click.style("Force mode: will rebuild existing pyramids", fg="yellow"))
     click.echo()
@@ -163,9 +147,7 @@ def main(
                 f,
                 output_dir,
                 tile_size,
-                quality,
                 force,
-                target_mpp,
             ): f
             for f in wsi_files
         }

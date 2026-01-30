@@ -70,12 +70,6 @@ PYTHON_TILE_CACHE_SIZE: int = _get_env_int("FASTPATH_PYTHON_CACHE_SIZE", 256)
 #: Default tile size in pixels
 DEFAULT_TILE_SIZE: int = 512
 
-#: Default JPEG quality for tiles
-DEFAULT_JPEG_QUALITY: int = 80
-
-#: Default target MPP when metadata unavailable
-DEFAULT_TARGET_MPP: float = 1.0
-
 
 # =============================================================================
 # Preprocessing Configuration
