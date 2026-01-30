@@ -308,44 +308,6 @@ Item {
                     rowSpacing: Theme.spacingSmall
                     columnSpacing: Theme.spacingLarge
 
-                    // Extraction method
-                    Label {
-                        text: "Method"
-                        color: Theme.text
-                    }
-                    ComboBox {
-                        id: methodCombo
-                        model: ListModel {
-                            ListElement { text: "Level 1 Direct (~10x)"; value: "level1" }
-                            ListElement { text: "Level 0 -> 20x"; value: "level0_resized" }
-                        }
-                        textRole: "text"
-                        enabled: !Preprocess.isProcessing && !Preprocess.batchComplete
-                        Layout.fillWidth: true
-
-                        property string selectedValue: model.get(currentIndex).value
-
-                        Component.onCompleted: {
-                            currentIndex = Settings.lastMethod === "level0_resized" ? 1 : 0
-                        }
-
-                        onActivated: {
-                            Settings.lastMethod = selectedValue
-                        }
-
-                        background: Rectangle {
-                            color: Theme.backgroundLight
-                            radius: Theme.radiusSmall
-                            border.color: Theme.border
-                        }
-                        contentItem: Text {
-                            text: methodCombo.displayText
-                            color: Theme.text
-                            verticalAlignment: Text.AlignVCenter
-                            leftPadding: Theme.spacingSmall
-                        }
-                    }
-
                     // Tile size
                     Label {
                         text: "Tile Size"
@@ -374,35 +336,6 @@ Item {
                             color: Theme.text
                             verticalAlignment: Text.AlignVCenter
                             leftPadding: Theme.spacingSmall
-                        }
-                    }
-
-                    // Quality
-                    Label {
-                        text: "JPEG Quality"
-                        color: Theme.text
-                    }
-                    RowLayout {
-                        Slider {
-                            id: qualitySlider
-                            from: 70
-                            to: 100
-                            stepSize: 1
-                            enabled: !Preprocess.isProcessing && !Preprocess.batchComplete
-                            Layout.preferredWidth: 150
-
-                            Component.onCompleted: {
-                                value = Settings.lastQuality
-                            }
-
-                            onMoved: {
-                                Settings.lastQuality = value
-                            }
-                        }
-                        Label {
-                            text: qualitySlider.value.toFixed(0)
-                            color: Theme.textMuted
-                            Layout.preferredWidth: 30
                         }
                     }
 
@@ -464,9 +397,7 @@ Item {
 
                 // Info label
                 Label {
-                    text: methodCombo.currentIndex === 0
-                        ? "Extracts level 1 directly from WSI (~10x magnification)"
-                        : "Extracts full resolution and resizes to 20x (higher quality, slower)"
+                    text: "Output: 0.5 MPP (20x equivalent), JPEG Q80"
                     color: Theme.textMuted
                     font.pixelSize: Theme.fontSizeSmall
                     font.italic: true
@@ -757,13 +688,11 @@ Item {
                 )
                 onClicked: {
                     var tileSize = parseInt(tileSizeCombo.currentText)
-                    var quality = qualitySlider.value
-                    var method = methodCombo.selectedValue
 
                     if (Preprocess.inputMode === "single") {
-                        Preprocess.startPreprocess(tileSize, quality, method)
+                        Preprocess.startPreprocess(tileSize)
                     } else {
-                        Preprocess.startBatchPreprocess(tileSize, quality, method)
+                        Preprocess.startBatchPreprocess(tileSize)
                     }
                 }
 

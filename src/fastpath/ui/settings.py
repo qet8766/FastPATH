@@ -14,8 +14,6 @@ class Settings(QObject):
 
     defaultOutputDirChanged = Signal()
     lastTileSizeChanged = Signal()
-    lastQualityChanged = Signal()
-    lastMethodChanged = Signal()
     parallelWorkersChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -43,28 +41,6 @@ class Settings(QObject):
         if self.lastTileSize != value:
             self._settings.setValue("preprocess/lastTileSize", value)
             self.lastTileSizeChanged.emit()
-
-    # Last quality (70-100)
-    @Property(int, notify=lastQualityChanged)
-    def lastQuality(self) -> int:
-        return self._settings.value("preprocess/lastQuality", 95, int)
-
-    @lastQuality.setter
-    def lastQuality(self, value: int) -> None:
-        if self.lastQuality != value:
-            self._settings.setValue("preprocess/lastQuality", value)
-            self.lastQualityChanged.emit()
-
-    # Last method (level1, level0_resized)
-    @Property(str, notify=lastMethodChanged)
-    def lastMethod(self) -> str:
-        return self._settings.value("preprocess/lastMethod", "level1", str)
-
-    @lastMethod.setter
-    def lastMethod(self, value: str) -> None:
-        if self.lastMethod != value:
-            self._settings.setValue("preprocess/lastMethod", value)
-            self.lastMethodChanged.emit()
 
     # Parallel workers (1-8)
     @Property(int, notify=parallelWorkersChanged)
