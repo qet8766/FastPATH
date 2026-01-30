@@ -1,137 +1,105 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+FastPATH is a pathology whole-slide image (WSI) viewer with a separate preprocessing CLI. Hybrid Python + QML + Rust.
 
-## Project Overview
+## Module Boundaries
 
-FastPATH is an extensible pathology whole-slide image (WSI) viewer. It preprocesses large WSI files into tiled pyramids (`.fastpath` directories), then displays them with pan/zoom, annotations, and AI plugin support.
-
-## Architecture
-
-**Hybrid Python + Rust design:**
-
-| Layer | Language | Purpose |
-|-------|----------|---------|
-| UI & App Logic | Python + QML | Views, controllers, AI plugins |
-| Tile Scheduler | Rust | High-performance tile loading with caching and prefetching |
-| Preprocessing | Python (pyvips) | WSI → .fastpath pyramid conversion via dzsave |
-
-### Data Flow
+The codebase has two independent workloads that share only data classes and a pyvips wrapper. **When working on one side, you can ignore the other.**
 
 ```
-User pans/zooms → QML SlideViewer → AppController.updateViewportWithVelocity()
-                                            ↓
-                      RustTileScheduler.update_viewport() → triggers prefetch
-                                            ↓
-                      TileModel.batchUpdate() → QML TileLayer renders (atomic)
-                                            ↓
-                      Image requests → TileImageProvider → RustTileScheduler.get_tile()
+src/fastpath/
+├── config.py          # Shared constants (both sides)
+├── core/
+│   ├── types.py       # TileCoord, LevelInfo (shared data classes, no logic)
+│   ├── slide.py       # VIEWER: SlideManager (metadata, viewport, getLevelForScale)
+│   ├── annotations.py # VIEWER: AnnotationManager (spatial indexing)
+│   └── project.py     # VIEWER: ProjectManager
+├── preprocess/        # PREPROCESSING ONLY (standalone CLI)
+│   ├── pyramid.py     # VipsPyramidBuilder (pyvips dzsave)
+│   ├── worker.py      # Batch processing worker
+│   ├── backends.py    # pyvips wrapper (also used by core/slide.py, ai/manager.py)
+│   └── __main__.py    # CLI entry point
+├── ui/                # VIEWER ONLY
+│   ├── app.py         # AppController (main entry, coordinates everything)
+│   ├── providers.py   # TileImageProvider (QML → Rust bridge)
+│   ├── models.py      # TileModel, RecentFilesModel, FileListModel
+│   ├── navigator.py   # SlideNavigator
+│   ├── settings.py    # Settings
+│   └── qml/           # QML components (SlideViewer, TileLayer, Theme, etc.)
+└── ai/                # VIEWER ONLY
+    ├── base.py        # AIPlugin ABC — inherit for custom plugins
+    └── manager.py     # AIPluginManager
+
+src/fastpath_core/     # Rust extension (VIEWER ONLY) — PyO3/maturin
+└── src/
+    ├── scheduler.rs   # RustTileScheduler (caching, prefetching)
+    ├── cache.rs, prefetch.rs, decoder.rs, format.rs, error.rs, lib.rs
 ```
 
-### Critical: Slide Loading Order
+### Cross-dependency summary
 
-In `AppController.openSlide()`, the load sequence is critical:
+| Working on… | Read these | Safe to ignore |
+|---|---|---|
+| **Viewer (UI/rendering)** | `ui/`, `core/`, `ai/`, `fastpath_core/`, `config.py` | `preprocess/` (only lazy-imported for in-app preprocessing) |
+| **Preprocessing CLI** | `preprocess/`, `core/types.py`, `config.py` | `ui/`, `ai/`, `core/slide.py`, `core/annotations.py`, `fastpath_core/` |
+| **Rust tile scheduler** | `src/fastpath_core/src/` | All Python except `ui/app.py` and `ui/providers.py` (callers) |
+| **AI plugins** | `ai/`, `core/slide.py`, `preprocess/backends.py` | `preprocess/pyramid.py`, `preprocess/worker.py`, `fastpath_core/` |
+
+### Communication between sides
+
+The two sides communicate only through the filesystem: preprocessing writes `.fastpath` directories, the viewer reads them. No runtime imports cross the boundary (the viewer's lazy import of preprocessing is optional, for in-app preprocessing UX).
+
+## Critical: Slide Loading Order
+
+In `AppController.openSlide()` (`ui/app.py`), the load sequence matters:
 ```python
 _rust_scheduler.load()         # 1. Load slide into Rust
 prefetch_low_res_levels()      # 2. Fill cache BEFORE QML requests tiles
 _slide_manager.load()          # 3. Emits slideLoaded → QML requests tiles
 ```
-If SlideManager loads first, its `slideLoaded` signal triggers QML to request tiles before the cache is populated, causing gray tiles.
+If SlideManager loads first, `slideLoaded` triggers QML tile requests before the cache is populated → gray tiles.
 
-### Module Structure
+## Preprocessing
 
-```
-src/fastpath/
-├── core/           # SlideManager, AnnotationManager (metadata, spatial indexing)
-├── preprocess/     # VipsPyramidBuilder (pyvips dzsave-based)
-├── ui/             # AppController, TileModel, QML providers
-│   └── qml/        # QML components (SlideViewer, TileLayer, Theme)
-└── ai/             # AIPlugin ABC, PluginManager
+Always **0.5 MPP** (20x equivalent), **JPEG Q80**, via pyvips `dzsave()`. These are hardcoded — not configurable.
 
-src/fastpath_core/  # Rust extension (PyO3/maturin) - RustTileScheduler
-```
-
-### Tile Format
-
-Preprocessing uses pyvips `dzsave()` which creates the **dzsave format**:
-- `tiles_files/N/col_row.jpg` where level 0 = lowest resolution (inverted from FastPATH convention)
-- Metadata includes `"tile_format": "dzsave"` to indicate this layout
-- The Rust scheduler handles the level inversion transparently
-
-### Level Selection
-
-`SlideManager.getLevelForScale(scale)` picks the pyramid level:
-- `target_downsample = 1/scale` (e.g., 4% zoom → downsample 25)
-- Picks highest level where `downsample <= target` (prefers sharper tiles)
-- Initial view typically uses level 3-5 depending on slide size and window dimensions
+- Layout: `tiles_files/N/col_row.jpg` — level 0 = lowest resolution (inverted from viewer convention)
+- Metadata includes `"tile_format": "dzsave"`; the Rust scheduler handles level inversion transparently
+- `getLevelForScale(scale)`: picks highest level where `downsample <= 1/scale`
 
 ## Development Commands
 
 ```bash
-# Install dependencies
-uv sync
-
-# Build Rust extension (required before running app)
-# On Windows, ensure cargo is in PATH first
-uv run maturin develop --release --manifest-path src/fastpath_core/Cargo.toml
-
-# Run the app (or use: fastpath)
-uv run python -m fastpath
-
-# Run preprocessing CLI (or use: fastpath-preprocess)
-uv run python -m fastpath.preprocess <input.svs> -o <output_dir>
-
-# Run all tests
-uv run python -m pytest tests/
-
-# Run a single test
-uv run python -m pytest tests/test_annotations.py -k "test_name"
-
-# Run Rust tests (ensure cargo is in PATH)
-cd src/fastpath_core && cargo test
-
-# Run viewer with example slide (after preprocessing)
-uv run python -m fastpath "output/example 1.fastpath"
+uv sync                                                                    # Install deps
+uv run maturin develop --release --manifest-path src/fastpath_core/Cargo.toml  # Build Rust (required)
+uv run python -m fastpath                                                  # Run viewer
+uv run python -m fastpath.preprocess <input.svs> -o <output_dir>           # Run preprocessing
+uv run python -m pytest tests/                                             # All tests
+uv run python -m pytest tests/test_annotations.py -k "test_name"           # Single test
+cd src/fastpath_core && cargo test                                         # Rust tests
 ```
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `src/fastpath/ui/app.py` | AppController - main entry point, coordinates SlideManager and RustTileScheduler |
-| `src/fastpath/core/slide.py` | SlideManager - metadata, viewport calculations, `getLevelForScale()` |
-| `src/fastpath/ui/providers.py` | TileImageProvider - bridges QML image requests to Rust scheduler |
-| `src/fastpath_core/src/scheduler.rs` | Rust tile scheduler - caching, prefetching, `prefetch_low_res_levels()` |
-| `src/fastpath/preprocess/pyramid.py` | VipsPyramidBuilder for WSI → .fastpath conversion |
-| `src/fastpath/ai/base.py` | AIPlugin ABC - inherit for custom plugins |
-| `tests/conftest.py` | Pytest fixtures including `mock_fastpath_dir` (creates dzsave-format test slides) |
 
 ## Code Conventions
 
-- **Python**: PySide6 (not PyQt6), `pathlib.Path` for file paths, type hints throughout
-- **Rust**: PyO3/maturin for Python bindings, rayon for parallelism, parking_lot for locks, crossbeam for channels
-- **QML**: Use `Theme.qml` singleton for colors/fonts, Fusion style for cross-platform consistency
-- **Signals**: Use Qt signals for cross-component communication (e.g., `slideLoaded`, `errorOccurred`)
-
-## Testing
-
-- Use `uv run python -m pytest` (not `uv run pytest`) to ensure correct module resolution
-- Use `mock_fastpath_dir` fixture for slide loading tests (creates dzsave-format tiles)
+- **Python**: PySide6 (not PyQt6), `pathlib.Path`, type hints throughout
+- **Rust**: PyO3/maturin, rayon for parallelism, parking_lot for locks, crossbeam for channels
+- **QML**: `Theme.qml` singleton for colors/fonts, Fusion style
+- **Signals**: Qt signals for cross-component communication (`slideLoaded`, `errorOccurred`)
+- **Testing**: Use `uv run python -m pytest` (not `uv run pytest`); use `mock_fastpath_dir` fixture for slide tests
 
 ## Performance Defaults
 
-- **Tile cache**: 12GB, **Prefetch distance**: 3 tiles ahead
-- Preprocessing: `VIPS_CONCURRENCY=8`, `VIPS_DISC_THRESHOLD=3GB`, `-p 3` (parallel slides) - set automatically in `preprocess/__main__.py`
+- Tile cache: 12GB (`TILE_CACHE_SIZE_MB`), Prefetch distance: 3 tiles (`PREFETCH_DISTANCE`) — see `config.py`
+- Preprocessing: `VIPS_CONCURRENCY=8`, `VIPS_DISC_THRESHOLD=3GB`, `-p 3` parallel slides — set in `preprocess/__main__.py`
 
 ## Windows Notes
 
-- VIPS and OpenSlide DLLs expected at `C:/vips/vips-dev-*/bin/` (handled automatically in `fastpath/__init__.py`)
+- VIPS/OpenSlide DLLs expected at `C:/vips/vips-dev-*/bin/` (auto-loaded in `fastpath/__init__.py`)
 
-## Debugging Tips
+## Debugging
 
-- **Gray tiles at load**: Check load order in `openSlide()` - prefetch must complete before `slideLoaded` signal
-- **Wrong tiles displayed**: Check `getLevelForScale()` - verify the level matches expected zoom
-- **Tile decode errors**: Rust scheduler logs `[TILE ERROR]` to stderr with path and error details
-- **Prefetch stats**: Watch for `[PREFETCH] Loading N tiles...` and `[PREFETCH] Done: X loaded, Y failed` in stderr
-- **Visual verification**: Use PIL's `ImageGrab.grab()` to capture screenshots during testing
-- **Race conditions**: AppController uses `_loading_lock` to prevent concurrent slide loads
+- **Gray tiles at load**: Check load order in `openSlide()` — prefetch must complete before `slideLoaded`
+- **Wrong tiles**: Check `getLevelForScale()` — verify level matches zoom
+- **Tile decode errors**: Rust logs `[TILE ERROR]` to stderr
+- **Prefetch stats**: `[PREFETCH] Loading N tiles...` / `[PREFETCH] Done: X loaded, Y failed` in stderr
+- **Race conditions**: `AppController._loading_lock` prevents concurrent slide loads
