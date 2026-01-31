@@ -238,8 +238,14 @@ class TestRustSchedulerComparisonWithPython:
         assert rust_w == python_w
         assert rust_h == python_h
 
-        # Data should be similar (allow for minor JPEG decoding differences)
-        python_data = python_tile.constBits().tobytes()
+        # Extract pixel data accounting for QImage stride padding
+        # (Qt aligns rows to 4-byte boundaries, so constBits() may include padding)
+        stride = python_tile.bytesPerLine()
+        row_bytes = python_w * 3  # RGB888 = 3 bytes per pixel
+        raw = python_tile.constBits().tobytes()
+        python_data = b"".join(
+            raw[r * stride : r * stride + row_bytes] for r in range(python_h)
+        )
         assert len(rust_data) == len(python_data)
 
     def test_metadata_consistency(self, mock_fastpath_dir: Path, qapp):
