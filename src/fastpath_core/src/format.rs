@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::error::{TileError, TileResult};
+use crate::error::TileResult;
 
 /// Tile format type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,7 +12,7 @@ pub enum TileFormat {
     /// Traditional format: levels/N/col_row.jpg
     #[default]
     Traditional,
-    /// DZSave format: tiles_files/N/col_row.jpg (inverted levels)
+    /// DZSave format: tiles_files/N/col_row.jpg
     DzSave,
 }
 
@@ -62,7 +62,7 @@ impl SlideMetadata {
         TileFormat::from_str(&self.tile_format)
     }
 
-    /// Get level info by index.
+    /// Get level info by level number.
     pub fn get_level(&self, level: u32) -> Option<&LevelInfo> {
         self.levels.iter().find(|l| l.level == level)
     }
@@ -78,54 +78,23 @@ impl SlideMetadata {
 pub struct TilePathResolver {
     fastpath_dir: PathBuf,
     format: TileFormat,
-    max_dz_level: u32,
 }
 
 impl TilePathResolver {
     /// Create a new resolver for a .fastpath directory.
     pub fn new(fastpath_dir: PathBuf, metadata: &SlideMetadata) -> TileResult<Self> {
         let format = metadata.format();
-        let max_dz_level = if format == TileFormat::DzSave {
-            Self::detect_max_dz_level(&fastpath_dir)?
-        } else {
-            0
-        };
 
         Ok(Self {
             fastpath_dir,
             format,
-            max_dz_level,
         })
-    }
-
-    /// Detect the maximum dzsave level by scanning the directory.
-    fn detect_max_dz_level(fastpath_dir: &Path) -> TileResult<u32> {
-        let tiles_dir = fastpath_dir.join("tiles_files");
-        if !tiles_dir.exists() {
-            return Err(TileError::MetadataError(
-                "tiles_files directory not found for dzsave format".to_string(),
-            ));
-        }
-
-        let mut max_level = 0u32;
-        for entry in std::fs::read_dir(&tiles_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Ok(level) = name.parse::<u32>() {
-                        max_level = max_level.max(level);
-                    }
-                }
-            }
-        }
-
-        Ok(max_level)
     }
 
     /// Get the file path for a tile.
     ///
     /// Args:
-    ///     level: FastPATH pyramid level (0 = highest resolution)
+    ///     level: Pyramid level number
     ///     col: Column index
     ///     row: Row index
     ///
@@ -141,12 +110,10 @@ impl TilePathResolver {
                     .join(format!("{}_{}.jpg", col, row))
             }
             TileFormat::DzSave => {
-                // dzsave levels are inverted: 0 = lowest resolution, max = highest
-                // FastPATH level 0 = highest resolution = dzsave max level
-                let dz_level = self.max_dz_level.saturating_sub(level);
+                // Level number matches dzsave directory name directly
                 self.fastpath_dir
                     .join("tiles_files")
-                    .join(dz_level.to_string())
+                    .join(level.to_string())
                     .join(format!("{}_{}.jpg", col, row))
             }
         };

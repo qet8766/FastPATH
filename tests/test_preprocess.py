@@ -13,8 +13,8 @@ class TestPreprocessIntegration:
 
     Tests verify the dzsave format structure where:
     - tiles_files/ contains the tile pyramid
-    - dzsave level 0 = smallest (FastPATH level 2)
-    - dzsave level 2 = largest (FastPATH level 0)
+    - Level 0 = lowest resolution (smallest)
+    - Level N = highest resolution (largest)
     """
 
     def test_mock_fastpath_structure(self, mock_fastpath_dir: Path):
@@ -33,20 +33,18 @@ class TestPreprocessIntegration:
             metadata = json.load(f)
         assert metadata.get("tile_format") == "dzsave"
 
-    def test_level0_tiles_exist(self, mock_fastpath_dir: Path):
-        """Largest dzsave level (level 2) should have 4x4 tiles (FastPATH level 0)."""
-        # dzsave level 2 = FastPATH level 0 (full resolution)
-        dz_level2 = mock_fastpath_dir / "tiles_files" / "2"
-        tiles = list(dz_level2.glob("*.jpg"))
+    def test_highest_res_tiles_exist(self, mock_fastpath_dir: Path):
+        """Level 2 (highest resolution) should have 4x4 tiles."""
+        level2 = mock_fastpath_dir / "tiles_files" / "2"
+        tiles = list(level2.glob("*.jpg"))
         assert len(tiles) == 16
 
-    def test_pyramid_levels_decrease(self, mock_fastpath_dir: Path):
-        """Higher dzsave levels should have more tiles (larger resolution)."""
-        # dzsave: level 0 = smallest, level 2 = largest
-        dz_level0 = len(list((mock_fastpath_dir / "tiles_files" / "0").glob("*.jpg")))
-        dz_level1 = len(list((mock_fastpath_dir / "tiles_files" / "1").glob("*.jpg")))
-        dz_level2 = len(list((mock_fastpath_dir / "tiles_files" / "2").glob("*.jpg")))
+    def test_pyramid_levels_increase(self, mock_fastpath_dir: Path):
+        """Higher level numbers should have more tiles (larger resolution)."""
+        level0 = len(list((mock_fastpath_dir / "tiles_files" / "0").glob("*.jpg")))
+        level1 = len(list((mock_fastpath_dir / "tiles_files" / "1").glob("*.jpg")))
+        level2 = len(list((mock_fastpath_dir / "tiles_files" / "2").glob("*.jpg")))
 
         # Higher level numbers have more tiles
-        assert dz_level2 > dz_level1 > dz_level0
-        assert dz_level0 >= 1
+        assert level2 > level1 > level0
+        assert level0 >= 1

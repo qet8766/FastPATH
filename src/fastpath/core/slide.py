@@ -48,7 +48,6 @@ class SlideManager(QObject):
         self._cache_size = PYTHON_TILE_CACHE_SIZE
         self._cache_lock = threading.Lock()  # Thread safety for cache access
         self._tile_format: str = "traditional"  # "traditional" or "dzsave"
-        self._max_dz_level: int = 0  # For dzsave level mapping
 
     @Slot(str)
     def load(self, path: str) -> bool:
@@ -90,18 +89,8 @@ class SlideManager(QObject):
             self._fastpath_dir = path
             self._levels = levels
 
-            # Detect tile format and set up level mapping
+            # Detect tile format
             self._tile_format = self._metadata.get("tile_format", "traditional")
-            if self._tile_format == "dzsave":
-                # Find max dzsave level for level mapping
-                slide_files = path / "tiles_files"
-                if slide_files.exists():
-                    level_dirs = [
-                        d for d in slide_files.iterdir()
-                        if d.is_dir() and d.name.isdigit()
-                    ]
-                    if level_dirs:
-                        self._max_dz_level = max(int(d.name) for d in level_dirs)
 
             self._tile_cache.clear()
             self.slideLoaded.emit()
@@ -121,7 +110,6 @@ class SlideManager(QObject):
         self._levels = []
         self._tile_cache.clear()
         self._tile_format = "traditional"
-        self._max_dz_level = 0
         self.slideClosed.emit()
 
     @Property(bool, notify=slideLoaded)
@@ -131,14 +119,14 @@ class SlideManager(QObject):
 
     @Property(int, notify=slideLoaded)
     def width(self) -> int:
-        """Slide width at level 0 in pixels."""
+        """Slide width at full resolution in pixels."""
         if not self._metadata:
             return 0
         return self._metadata["dimensions"][0]
 
     @Property(int, notify=slideLoaded)
     def height(self) -> int:
-        """Slide height at level 0 in pixels."""
+        """Slide height at full resolution in pixels."""
         if not self._metadata:
             return 0
         return self._metadata["dimensions"][1]
@@ -157,7 +145,7 @@ class SlideManager(QObject):
 
     @Property(float, notify=slideLoaded)
     def mpp(self) -> float:
-        """Microns per pixel at level 0."""
+        """Microns per pixel at full resolution."""
         if not self._metadata:
             return 0.5
         return self._metadata["target_mpp"]
@@ -184,30 +172,32 @@ class SlideManager(QObject):
         downsample <= target, ensuring crisp display (GPU downscaling
         looks better than upscaling).
 
+        Convention-independent: works with any level numbering scheme
+        by comparing downsample values rather than level indices.
+
         Args:
             scale: View scale (1.0 = full resolution, 0.5 = half)
 
         Returns:
-            Level index (0 = highest resolution)
+            Level index for the best matching level
         """
         if not self._levels:
             return 0
 
         target_downsample = 1.0 / scale
 
-        # Find the highest resolution level (lowest downsample) where downsample <= target.
-        # This ensures we never show blurrier tiles than needed.
-        best_level = 0  # Default to highest resolution if none qualify
-
+        # Pick level with largest downsample that's still <= target
+        best = None
         for level_info in self._levels:
             if level_info.downsample <= target_downsample:
-                # This level has enough resolution - pick the highest level number
-                # among those that qualify (higher level = lower resolution within
-                # acceptable range, which is more efficient)
-                if level_info.level > best_level:
-                    best_level = level_info.level
+                if best is None or level_info.downsample > best.downsample:
+                    best = level_info
 
-        return best_level
+        if best is not None:
+            return best.level
+
+        # No level qualifies — return highest resolution (smallest downsample)
+        return min(self._levels, key=lambda l: l.downsample).level
 
     @Slot(int, result="QVariantList")
     def getLevelInfo(self, level: int) -> list:
@@ -215,9 +205,9 @@ class SlideManager(QObject):
 
         Returns: [downsample, cols, rows]
         """
-        if 0 <= level < len(self._levels):
-            info = self._levels[level]
-            return [info.downsample, info.cols, info.rows]
+        for info in self._levels:
+            if info.level == level:
+                return [info.downsample, info.cols, info.rows]
         return [1, 0, 0]
 
     @Slot(float, float, float, float, float, result="QVariantList")
@@ -244,7 +234,9 @@ class SlideManager(QObject):
             return []
 
         level = self.getLevelForScale(scale)
-        level_info = self._levels[level]
+        level_info = self._get_level_info_internal(level)
+        if level_info is None:
+            return []
         downsample = level_info.downsample
         tile_size = self.tileSize
 
@@ -263,13 +255,20 @@ class SlideManager(QObject):
 
         return tiles
 
+    def _get_level_info_internal(self, level: int) -> LevelInfo | None:
+        """Get LevelInfo by level number (not index)."""
+        for info in self._levels:
+            if info.level == level:
+                return info
+        return None
+
     def _get_tile_path_internal(self, level: int, col: int, row: int) -> Path | None:
         """Get the file path for a tile (internal method).
 
         Handles both traditional (levels/) and dzsave (slide_files/) formats.
 
         Args:
-            level: FastPATH pyramid level (0 = highest resolution)
+            level: Pyramid level number
             col: Column index
             row: Row index
 
@@ -280,10 +279,8 @@ class SlideManager(QObject):
             return None
 
         if self._tile_format == "dzsave":
-            # dzsave levels are inverted: 0 = lowest resolution, max = highest
-            # FastPATH level 0 = highest resolution = dzsave max level
-            dz_level = self._max_dz_level - level
-            tile_path = self._fastpath_dir / "tiles_files" / str(dz_level) / f"{col}_{row}.jpg"
+            # Level number matches dzsave directory name directly
+            tile_path = self._fastpath_dir / "tiles_files" / str(level) / f"{col}_{row}.jpg"
         else:
             # Traditional format: levels/N/col_row.jpg
             tile_path = self._fastpath_dir / "levels" / str(level) / f"{col}_{row}.jpg"
@@ -297,7 +294,7 @@ class SlideManager(QObject):
         """Get the file path for a tile.
 
         Args:
-            level: Pyramid level (0 = highest resolution)
+            level: Pyramid level number
             col: Column index (0-based)
             row: Row index (0-based)
 
@@ -305,11 +302,11 @@ class SlideManager(QObject):
             File path string, or empty string if tile doesn't exist or coords invalid.
         """
         # Bounds validation
-        if level < 0 or level >= len(self._levels):
-            logger.debug("Invalid level %d (valid: 0-%d)", level, len(self._levels) - 1)
+        level_info = self._get_level_info_internal(level)
+        if level_info is None:
+            logger.debug("Invalid level %d", level)
             return ""
 
-        level_info = self._levels[level]
         if col < 0 or col >= level_info.cols:
             logger.debug("Invalid col %d for level %d (valid: 0-%d)", col, level, level_info.cols - 1)
             return ""
@@ -415,10 +412,10 @@ class SlideManager(QObject):
 
         Returns: [x, y, width, height]
         """
-        if not self._levels or level < 0 or level >= len(self._levels):
+        level_info = self._get_level_info_internal(level)
+        if not self._levels or level_info is None:
             return [0, 0, 0, 0]
 
-        level_info = self._levels[level]
         tile_size = self.tileSize * level_info.downsample
 
         x = col * tile_size

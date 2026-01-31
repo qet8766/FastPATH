@@ -82,17 +82,17 @@ class TestSlideManager:
         manager = SlideManager()
         manager.load(str(mock_fastpath_dir))
 
-        # Full resolution
-        assert manager.getLevelForScale(1.0) == 0
+        # Full resolution → level 2 (ds=1)
+        assert manager.getLevelForScale(1.0) == 2
 
-        # Half resolution
-        assert manager.getLevelForScale(0.5) in [0, 1]
+        # Half resolution → level 1 (ds=2)
+        assert manager.getLevelForScale(0.5) == 1
 
-        # Quarter resolution
-        assert manager.getLevelForScale(0.25) in [1, 2]
+        # Quarter resolution → level 0 (ds=4)
+        assert manager.getLevelForScale(0.25) == 0
 
-        # Very small scale
-        assert manager.getLevelForScale(0.1) == 2
+        # Very small scale → level 0 (lowest resolution)
+        assert manager.getLevelForScale(0.1) == 0
 
     def test_get_visible_tiles(self, qapp, mock_fastpath_dir: Path):
         """Should return correct visible tiles for viewport."""
@@ -112,13 +112,13 @@ class TestSlideManager:
         manager = SlideManager()
         manager.load(str(mock_fastpath_dir))
 
-        # Existing tile
-        path = manager.getTilePath(0, 0, 0)
+        # Existing tile at level 2 (highest resolution, 4x4 grid)
+        path = manager.getTilePath(2, 0, 0)
         assert path != ""
         assert Path(path).exists()
 
-        # Non-existing tile
-        path = manager.getTilePath(0, 100, 100)
+        # Non-existing tile (out of bounds for level 2)
+        path = manager.getTilePath(2, 100, 100)
         assert path == ""
 
     def test_get_tile_position(self, qapp, mock_fastpath_dir: Path):
@@ -126,15 +126,19 @@ class TestSlideManager:
         manager = SlideManager()
         manager.load(str(mock_fastpath_dir))
 
-        # First tile at level 0
+        # Level 0 (ds=4): each tile covers 512*4=2048 pixels
         pos = manager.getTilePosition(0, 0, 0)
+        assert pos == [0, 0, 2048, 2048]
+
+        # Level 2 (ds=1): each tile covers 512 pixels
+        pos = manager.getTilePosition(2, 0, 0)
         assert pos == [0, 0, 512, 512]
 
-        # Second column
-        pos = manager.getTilePosition(0, 1, 0)
+        # Level 2, second column
+        pos = manager.getTilePosition(2, 1, 0)
         assert pos == [512, 0, 512, 512]
 
-        # Level 1 tile (2x downsample)
+        # Level 1 (ds=2): each tile covers 1024 pixels
         pos = manager.getTilePosition(1, 0, 0)
         assert pos == [0, 0, 1024, 1024]
 
@@ -178,17 +182,23 @@ class TestLevelInfo:
         manager = SlideManager()
         manager.load(str(mock_fastpath_dir))
 
-        # Level 0
+        # Level 0 (lowest resolution)
         info = manager.getLevelInfo(0)
-        assert info[0] == 1  # downsample
-        assert info[1] == 4  # cols
-        assert info[2] == 4  # rows
+        assert info[0] == 4  # downsample
+        assert info[1] == 1  # cols
+        assert info[2] == 1  # rows
 
         # Level 1
         info = manager.getLevelInfo(1)
         assert info[0] == 2  # downsample
         assert info[1] == 2  # cols
         assert info[2] == 2  # rows
+
+        # Level 2 (highest resolution)
+        info = manager.getLevelInfo(2)
+        assert info[0] == 1  # downsample
+        assert info[1] == 4  # cols
+        assert info[2] == 4  # rows
 
     def test_get_level_info_invalid(self, qapp, mock_fastpath_dir: Path):
         """Should return zeros for invalid level."""

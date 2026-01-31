@@ -1,9 +1,12 @@
 """Preprocessing pipeline for converting WSI files to tile pyramids."""
 
-from .pyramid import (
-    VipsPyramidBuilder,
+from .metadata import (
+    PyramidMetadata,
     PyramidStatus,
     check_pyramid_status,
+)
+from .pyramid import (
+    VipsPyramidBuilder,
     build_pyramid,
     is_vips_dzsave_available,
 )
@@ -13,6 +16,7 @@ from .backends import (
 )
 
 __all__ = [
+    "PyramidMetadata",
     "VipsPyramidBuilder",
     "PyramidStatus",
     "check_pyramid_status",

@@ -70,13 +70,13 @@ class TestRustTileScheduler:
         scheduler = RustTileScheduler()
         scheduler.load(str(mock_fastpath_dir))
 
-        # Level 0
+        # Level 0 (lowest resolution)
         info0 = scheduler.get_level_info(0)
         assert info0 is not None
         downsample, cols, rows = info0
-        assert downsample == 1
-        assert cols == 4
-        assert rows == 4
+        assert downsample == 4
+        assert cols == 1
+        assert rows == 1
 
         # Level 1
         info1 = scheduler.get_level_info(1)
@@ -86,13 +86,13 @@ class TestRustTileScheduler:
         assert cols == 2
         assert rows == 2
 
-        # Level 2
+        # Level 2 (highest resolution)
         info2 = scheduler.get_level_info(2)
         assert info2 is not None
         downsample, cols, rows = info2
-        assert downsample == 4
-        assert cols == 1
-        assert rows == 1
+        assert downsample == 1
+        assert cols == 4
+        assert rows == 4
 
         # Invalid level
         assert scheduler.get_level_info(99) is None
@@ -137,10 +137,10 @@ class TestRustTileScheduler:
         assert stats["hits"] == 0
         assert stats["misses"] == 0
 
-        # Load some tiles
-        scheduler.get_tile(0, 0, 0)  # Miss
-        scheduler.get_tile(0, 0, 0)  # Hit
-        scheduler.get_tile(0, 1, 0)  # Miss
+        # Load tiles from level 2 (highest resolution, 4x4 grid)
+        scheduler.get_tile(2, 0, 0)  # Miss
+        scheduler.get_tile(2, 0, 0)  # Hit
+        scheduler.get_tile(2, 1, 0)  # Miss
 
         stats = scheduler.cache_stats()
         assert stats["hits"] == 1
@@ -190,9 +190,9 @@ class TestRustTileScheduler:
         scheduler = RustTileScheduler()
         scheduler.load(str(mock_fastpath_dir))
 
-        # Load some tiles
-        scheduler.get_tile(0, 0, 0)
-        scheduler.get_tile(0, 1, 0)
+        # Load tiles from level 2 (highest resolution, 4x4 grid)
+        scheduler.get_tile(2, 0, 0)
+        scheduler.get_tile(2, 1, 0)
 
         stats = scheduler.cache_stats()
         assert stats["num_tiles"] == 2

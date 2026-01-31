@@ -48,10 +48,7 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
     fastpath_dir.mkdir()
 
     # Create tiles_files directory (dzsave format)
-    # dzsave level numbering: 0 = smallest, N = largest (full resolution)
-    # FastPATH level 0 = dzsave level 2 (4x4 grid)
-    # FastPATH level 1 = dzsave level 1 (2x2 grid)
-    # FastPATH level 2 = dzsave level 0 (1x1 grid)
+    # Level 0 = lowest resolution (1x1 grid), level 2 = highest resolution (4x4 grid)
     tiles_dir = fastpath_dir / "tiles_files"
     tiles_dir.mkdir()
 
@@ -61,7 +58,7 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
 
     # Use pyvips if available, otherwise use raw JPEG writing
     if is_vips_available():
-        # dzsave level 2 (FastPATH level 0): 4x4 grid of tiles
+        # Level 2 (highest resolution): 4x4 grid of tiles
         dz_level2 = tiles_dir / "2"
         dz_level2.mkdir()
         for row in range(4):
@@ -69,7 +66,7 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
                 vips_img = VIPSBackend.from_numpy(sample_rgb_array)
                 VIPSBackend.save_jpeg(vips_img, dz_level2 / f"{col}_{row}.jpg", quality=95)
 
-        # dzsave level 1 (FastPATH level 1): 2x2 grid
+        # Level 1 (medium resolution): 2x2 grid
         dz_level1 = tiles_dir / "1"
         dz_level1.mkdir()
         resized = VIPSBackend.resize(VIPSBackend.from_numpy(sample_rgb_array), (512, 512))
@@ -77,7 +74,7 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
             for col in range(2):
                 VIPSBackend.save_jpeg(resized, dz_level1 / f"{col}_{row}.jpg", quality=95)
 
-        # dzsave level 0 (FastPATH level 2): 1x1 grid
+        # Level 0 (lowest resolution): 1x1 grid
         dz_level0 = tiles_dir / "0"
         dz_level0.mkdir()
         VIPSBackend.save_jpeg(resized, dz_level0 / "0_0.jpg", quality=95)
@@ -124,21 +121,21 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
             ])
             path.write_bytes(jpeg_data)
 
-        # dzsave level 2 (FastPATH level 0): 4x4 grid of tiles
+        # Level 2 (highest resolution): 4x4 grid of tiles
         dz_level2 = tiles_dir / "2"
         dz_level2.mkdir()
         for row in range(4):
             for col in range(4):
                 create_minimal_jpeg(dz_level2 / f"{col}_{row}.jpg")
 
-        # dzsave level 1 (FastPATH level 1): 2x2 grid
+        # Level 1 (medium resolution): 2x2 grid
         dz_level1 = tiles_dir / "1"
         dz_level1.mkdir()
         for row in range(2):
             for col in range(2):
                 create_minimal_jpeg(dz_level1 / f"{col}_{row}.jpg")
 
-        # dzsave level 0 (FastPATH level 2): 1x1 grid
+        # Level 0 (lowest resolution): 1x1 grid
         dz_level0 = tiles_dir / "0"
         dz_level0.mkdir()
         create_minimal_jpeg(dz_level0 / "0_0.jpg")
@@ -147,6 +144,7 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
         create_minimal_jpeg(fastpath_dir / "thumbnail.jpg")
 
     # Create metadata with dzsave format marker
+    # Level 0 = lowest resolution (ds=4), level 2 = highest resolution (ds=1)
     metadata = {
         "version": "1.0",
         "source_file": "test_slide.svs",
@@ -156,9 +154,9 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
         "tile_size": 512,
         "dimensions": [2048, 2048],
         "levels": [
-            {"level": 0, "downsample": 1, "cols": 4, "rows": 4},
+            {"level": 0, "downsample": 4, "cols": 1, "rows": 1},
             {"level": 1, "downsample": 2, "cols": 2, "rows": 2},
-            {"level": 2, "downsample": 4, "cols": 1, "rows": 1},
+            {"level": 2, "downsample": 1, "cols": 4, "rows": 4},
         ],
         "background_color": [255, 255, 255],
         "preprocessed_at": "2024-01-15T10:30:00Z",

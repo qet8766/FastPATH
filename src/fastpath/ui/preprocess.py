@@ -141,11 +141,8 @@ class BatchPreprocessWorker(QThread):
     def run(self) -> None:
         """Run parallel batch preprocessing."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from fastpath.preprocess.pyramid import (
-            VipsPyramidBuilder,
-            check_pyramid_status,
-            PyramidStatus,
-        )
+        from fastpath.preprocess.metadata import check_pyramid_status, PyramidStatus
+        from fastpath.preprocess.pyramid import VipsPyramidBuilder
 
         processed = 0
         skipped = 0

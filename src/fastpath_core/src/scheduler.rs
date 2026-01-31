@@ -318,9 +318,9 @@ impl TileScheduler {
         let num_levels = state.metadata.num_levels();
 
         // Prefetch all levels where tile count is manageable
-        // Start from lowest resolution and work up
+        // Start from lowest resolution (level 0 in dzsave convention) and work up
         let mut levels_to_prefetch = Vec::new();
-        for level in (0..num_levels).rev() {
+        for level in 0..num_levels {
             if let Some(level_info) = state.metadata.get_level(level as u32) {
                 let total_tiles = level_info.cols * level_info.rows;
                 if total_tiles <= MAX_TILES_PER_LEVEL {

@@ -80,21 +80,20 @@ impl PrefetchCalculator {
 
     /// Get the best pyramid level for a given scale.
     ///
-    /// Biases toward higher resolution by picking the level with downsample <= target.
-    /// This ensures crisp display (GPU downscaling looks better than upscaling).
+    /// Convention-independent: picks the level with the largest downsample
+    /// that's still <= target. Falls back to the highest-resolution level
+    /// (smallest downsample) if none qualify.
     pub fn level_for_scale(&self, metadata: &SlideMetadata, scale: f64) -> u32 {
         let target_downsample = 1.0 / scale;
 
-        // Find highest resolution level (lowest downsample) where downsample <= target.
-        // Among qualifying levels, pick the one with highest level number (most efficient
-        // while still meeting resolution requirement).
         metadata
             .levels
             .iter()
             .filter(|l| (l.downsample as f64) <= target_downsample)
-            .max_by_key(|l| l.level)
+            .max_by_key(|l| l.downsample)
+            .or_else(|| metadata.levels.iter().min_by_key(|l| l.downsample))
             .map(|l| l.level)
-            .unwrap_or(0) // Default to level 0 (highest resolution) if none qualify
+            .unwrap_or(0)
     }
 
     /// Calculate tiles visible in the current viewport.
@@ -297,9 +296,9 @@ mod tests {
             levels: vec![
                 LevelInfo {
                     level: 0,
-                    downsample: 1,
-                    cols: 20,
-                    rows: 20,
+                    downsample: 4,
+                    cols: 5,
+                    rows: 5,
                 },
                 LevelInfo {
                     level: 1,
@@ -309,14 +308,14 @@ mod tests {
                 },
                 LevelInfo {
                     level: 2,
-                    downsample: 4,
-                    cols: 5,
-                    rows: 5,
+                    downsample: 1,
+                    cols: 20,
+                    rows: 20,
                 },
             ],
             target_mpp: 0.5,
             target_magnification: 20.0,
-            tile_format: String::new(),
+            tile_format: "dzsave".to_string(),
             source_file: String::new(),
         }
     }
@@ -326,18 +325,18 @@ mod tests {
         let calc = PrefetchCalculator::new(PrefetchConfig::default());
         let metadata = test_metadata();
 
-        // Exact boundary cases
-        assert_eq!(calc.level_for_scale(&metadata, 1.0), 0);
-        assert_eq!(calc.level_for_scale(&metadata, 0.5), 1);
-        assert_eq!(calc.level_for_scale(&metadata, 0.25), 2);
+        // Exact boundary cases (dzsave: level 2=ds1, level 1=ds2, level 0=ds4)
+        assert_eq!(calc.level_for_scale(&metadata, 1.0), 2);   // ds=1 → level 2
+        assert_eq!(calc.level_for_scale(&metadata, 0.5), 1);   // ds=2 → level 1
+        assert_eq!(calc.level_for_scale(&metadata, 0.25), 0);  // ds=4 → level 0
 
-        // Intermediate scales should bias toward higher resolution (lower level number)
-        // scale 0.6 → target_downsample=1.67 → only level 0 (ds=1) qualifies
-        assert_eq!(calc.level_for_scale(&metadata, 0.6), 0);
-        // scale 0.3 → target_downsample=3.33 → levels 0,1 qualify → pick level 1
+        // Intermediate scales — pick largest downsample <= target
+        // scale 0.6 → target_downsample=1.67 → only level 2 (ds=1) qualifies
+        assert_eq!(calc.level_for_scale(&metadata, 0.6), 2);
+        // scale 0.3 → target_downsample=3.33 → levels 2 (ds=1), 1 (ds=2) qualify → pick level 1 (largest ds)
         assert_eq!(calc.level_for_scale(&metadata, 0.3), 1);
-        // scale 0.75 → target_downsample=1.33 → only level 0 qualifies
-        assert_eq!(calc.level_for_scale(&metadata, 0.75), 0);
+        // scale 0.75 → target_downsample=1.33 → only level 2 (ds=1) qualifies
+        assert_eq!(calc.level_for_scale(&metadata, 0.75), 2);
     }
 
     #[test]
@@ -348,9 +347,9 @@ mod tests {
         let viewport = Viewport::new(0.0, 0.0, 1024.0, 1024.0, 1.0, 0.0, 0.0);
         let tiles = calc.visible_tiles(&metadata, &viewport);
 
-        // 1024 / 512 = 2 tiles in each direction, ceil'd to handle partial tiles
+        // At scale 1.0, level 2 (ds=1) is selected. 1024 / 512 = 2 tiles in each direction
         assert!(!tiles.is_empty());
-        assert!(tiles.iter().all(|t| t.level == 0));
+        assert!(tiles.iter().all(|t| t.level == 2));
     }
 
     #[test]
