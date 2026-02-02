@@ -13,8 +13,11 @@ Environment Variables:
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -24,7 +27,9 @@ def _get_env_int(name: str, default: int) -> int:
         try:
             return int(value)
         except ValueError:
-            pass
+            logger.warning(
+                "Invalid integer for %s: %r, using default %d", name, value, default
+            )
     return default
 
 
@@ -84,6 +89,12 @@ VIPS_DISC_THRESHOLD: str = "3g"
 #: Default parallel slides for batch preprocessing
 DEFAULT_PARALLEL_SLIDES: int = 3
 
+#: Target microns-per-pixel for preprocessed tiles (20x equivalent)
+TARGET_MPP: float = 0.5
+
+#: JPEG quality for preprocessed tiles
+JPEG_QUALITY: int = 80
+
 #: Supported WSI file extensions
 WSI_EXTENSIONS: frozenset[str] = frozenset({
     ".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".vms", ".vmu", ".scn"
@@ -111,3 +122,35 @@ PLACEHOLDER_COLOR: tuple[int, int, int] = (224, 224, 224)
 
 #: RGB bytes per pixel (for stride calculations)
 RGB_BYTES_PER_PIXEL: int = 3
+
+
+# =============================================================================
+# Validation
+# =============================================================================
+
+
+def _validate_config() -> None:
+    """Validate configuration values and log warnings for out-of-range settings."""
+    global TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, PYTHON_TILE_CACHE_SIZE
+
+    if TILE_CACHE_SIZE_MB < 1:
+        logger.warning(
+            "TILE_CACHE_SIZE_MB=%d is too low, clamping to 1", TILE_CACHE_SIZE_MB
+        )
+        TILE_CACHE_SIZE_MB = 1
+
+    if PREFETCH_DISTANCE < 0:
+        logger.warning(
+            "PREFETCH_DISTANCE=%d is negative, clamping to 0", PREFETCH_DISTANCE
+        )
+        PREFETCH_DISTANCE = 0
+
+    if PYTHON_TILE_CACHE_SIZE < 1:
+        logger.warning(
+            "PYTHON_TILE_CACHE_SIZE=%d is too low, clamping to 1",
+            PYTHON_TILE_CACHE_SIZE,
+        )
+        PYTHON_TILE_CACHE_SIZE = 1
+
+
+_validate_config()

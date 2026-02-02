@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from fastpath.preprocess.backends import (
     VIPSBackend,
@@ -16,7 +14,6 @@ from fastpath.preprocess.backends import (
 )
 
 
-@pytest.mark.skipif(not is_vips_available(), reason="PyVIPS not available")
 class TestVIPSBackend:
     """Tests for the PyVIPS backend."""
 
@@ -135,15 +132,7 @@ class TestBackendSelection:
         name = get_backend_name()
         assert name == "PyVIPS"
 
-    @pytest.mark.skipif(not is_vips_available(), reason="PyVIPS not available")
     def test_get_backend_returns_vips(self):
         """Should return VIPSBackend when vips is available."""
         backend = get_backend()
         assert backend is VIPSBackend
-
-    @pytest.mark.skipif(is_vips_available(), reason="PyVIPS is available")
-    def test_get_backend_raises_without_vips(self):
-        """Should raise RuntimeError when vips is not available."""
-        with pytest.raises(RuntimeError) as excinfo:
-            get_backend()
-        assert "PyVIPS is required" in str(excinfo.value)

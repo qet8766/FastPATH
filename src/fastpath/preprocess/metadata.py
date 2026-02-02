@@ -25,8 +25,6 @@ class PyramidStatus(Enum):
 def check_pyramid_status(pyramid_dir: Path) -> PyramidStatus:
     """Check the status of an existing pyramid directory.
 
-    Supports both traditional format (levels/) and dzsave format (slide_files/).
-
     Args:
         pyramid_dir: Path to the .fastpath directory
 
@@ -54,42 +52,22 @@ def check_pyramid_status(pyramid_dir: Path) -> PyramidStatus:
             if field not in metadata:
                 return PyramidStatus.CORRUPTED
 
-        # Determine tile format (dzsave or traditional)
-        tile_format = metadata.get("tile_format", "traditional")
+        # Check tiles_files directory structure
+        slide_files_dir = pyramid_dir / "tiles_files"
+        if not slide_files_dir.exists():
+            return PyramidStatus.INCOMPLETE
 
-        if tile_format == "dzsave":
-            # Check slide_files directory structure
-            slide_files_dir = pyramid_dir / "tiles_files"
-            if not slide_files_dir.exists():
-                return PyramidStatus.INCOMPLETE
+        # Verify at least one level directory has tiles
+        level_dirs = [d for d in slide_files_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+        if not level_dirs:
+            return PyramidStatus.INCOMPLETE
 
-            # Verify at least one level directory has tiles
-            level_dirs = [d for d in slide_files_dir.iterdir() if d.is_dir() and d.name.isdigit()]
-            if not level_dirs:
-                return PyramidStatus.INCOMPLETE
-
-            for level_dir in level_dirs:
-                tiles = list(level_dir.glob("*.jpg"))
-                if tiles:
-                    break
-            else:
-                return PyramidStatus.INCOMPLETE
+        for level_dir in level_dirs:
+            tiles = list(level_dir.glob("*.jpg"))
+            if tiles:
+                break
         else:
-            # Traditional format: Check levels directory structure
-            levels_dir = pyramid_dir / "levels"
-            if not levels_dir.exists():
-                return PyramidStatus.INCOMPLETE
-
-            # Verify each level directory exists and has tiles
-            for level_info in metadata["levels"]:
-                level_dir = levels_dir / str(level_info["level"])
-                if not level_dir.exists():
-                    return PyramidStatus.INCOMPLETE
-
-                # Check if level has at least some tiles (not empty)
-                tiles = list(level_dir.glob("*.jpg"))
-                if not tiles:
-                    return PyramidStatus.INCOMPLETE
+            return PyramidStatus.INCOMPLETE
 
         # Check thumbnail exists
         if not (pyramid_dir / "thumbnail.jpg").exists():
@@ -161,5 +139,5 @@ class PyramidMetadata:
             ],
             background_color=tuple(data["background_color"]),
             preprocessed_at=data["preprocessed_at"],
-            tile_format=data.get("tile_format", "traditional"),
+            tile_format=data.get("tile_format", "dzsave"),
         )

@@ -183,7 +183,9 @@ class AnnotationManager(QObject):
         self._dirty = False
         # Thread safety for R-tree access (RLock for reentrant calls)
         self._index_lock = threading.RLock()
-        # Use incrementing integer for R-tree IDs to avoid hash collisions
+        # R-tree requires integer IDs for insert/delete. We use incrementing
+        # integers rather than hashing string IDs to guarantee uniqueness
+        # (hash collisions would silently corrupt the index).
         self._next_rtree_id = 0
         self._id_to_rtree: dict[str, int] = {}  # annotation_id -> rtree_id
 
@@ -221,6 +223,10 @@ class AnnotationManager(QObject):
         Returns:
             The annotation ID
         """
+        if not coordinates:
+            logger.warning("Skipping annotation with empty coordinates (type=%s)", ann_type)
+            return ""
+
         ann_id = self._generate_id()
         coords = [tuple(c) for c in coordinates]
 

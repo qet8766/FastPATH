@@ -460,14 +460,14 @@ mod tests {
             ],
             "target_mpp": 0.5,
             "target_magnification": 20.0,
-            "tile_format": "traditional"
+            "tile_format": "dzsave"
         }"#;
 
         fs::write(dir.join("metadata.json"), metadata).unwrap();
 
-        // Create levels directory structure
-        fs::create_dir_all(dir.join("levels/0")).unwrap();
-        fs::create_dir_all(dir.join("levels/1")).unwrap();
+        // Create tiles_files directory structure
+        fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
+        fs::create_dir_all(dir.join("tiles_files/1")).unwrap();
     }
 
     #[test]

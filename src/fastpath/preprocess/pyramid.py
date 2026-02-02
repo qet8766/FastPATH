@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastpath.config import THUMBNAIL_MAX_SIZE, THUMBNAIL_JPEG_QUALITY
+from fastpath.config import (
+    JPEG_QUALITY,
+    TARGET_MPP,
+    THUMBNAIL_JPEG_QUALITY,
+    THUMBNAIL_MAX_SIZE,
+)
 from fastpath.core.types import LevelInfo
 
 from .metadata import PyramidMetadata, PyramidStatus, check_pyramid_status
@@ -61,11 +66,6 @@ class VipsPyramidBuilder:
         - tiles_files/N/col_row.jpg (Deep Zoom structure)
         - Level 0 = lowest resolution, level N = highest resolution (native dzsave convention)
     """
-
-    #: Fixed target microns-per-pixel (20x equivalent)
-    TARGET_MPP: float = 0.5
-    #: Fixed JPEG quality
-    JPEG_QUALITY: int = 80
 
     def __init__(self, tile_size: int = 512) -> None:
         if not _HAS_VIPS_OPENSLIDE:
@@ -120,8 +120,6 @@ class VipsPyramidBuilder:
         pyramid_dir.mkdir()
 
         # Create subdirectories
-        levels_dir = pyramid_dir / "levels"
-        levels_dir.mkdir()
         annotations_dir = pyramid_dir / "annotations"
         annotations_dir.mkdir()
 
@@ -131,16 +129,16 @@ class VipsPyramidBuilder:
         base_mpp = self._get_base_mpp(slide_path)
         logger.info("Loaded %s: %d x %d px (MPP %.4f)", slide_path.name, image.width, image.height, base_mpp)
 
-        if base_mpp < self.TARGET_MPP:
-            resize_factor = base_mpp / self.TARGET_MPP
-            logger.info("Resizing by %.3f for %.1f MPP...", resize_factor, self.TARGET_MPP)
+        if base_mpp < TARGET_MPP:
+            resize_factor = base_mpp / TARGET_MPP
+            logger.info("Resizing by %.3f for %.1f MPP...", resize_factor, TARGET_MPP)
             image = image.resize(resize_factor, vscale=resize_factor, kernel="lanczos3")
-            actual_mpp = self.TARGET_MPP
+            actual_mpp = TARGET_MPP
             logger.info("Resized to %d x %d px", image.width, image.height)
-        elif base_mpp > self.TARGET_MPP:
+        elif base_mpp > TARGET_MPP:
             logger.warning(
                 "Source MPP %.3f is coarser than target %.1f — using source resolution as-is",
-                base_mpp, self.TARGET_MPP,
+                base_mpp, TARGET_MPP,
             )
             actual_mpp = base_mpp
         else:
@@ -168,7 +166,7 @@ class VipsPyramidBuilder:
             str(pyramid_dir / "tiles"),
             tile_size=self.tile_size,
             overlap=0,
-            suffix=f".jpg[Q={self.JPEG_QUALITY},interlace]",  # Progressive JPEG Q80
+            suffix=f".jpg[Q={JPEG_QUALITY},interlace]",  # Progressive JPEG Q80
             depth="onetile",  # Stop when tile fits in one tile
             layout="dz",  # Deep Zoom layout: tiles_files/level/col_row.jpg
             strip=True,  # Remove metadata for smaller/faster tiles

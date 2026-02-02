@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,10 +39,15 @@ class ProjectData:
             "metadata": self.metadata,
         }
 
+    _KNOWN_VERSIONS = {"1.0"}
+
     @classmethod
     def from_dict(cls, data: dict) -> ProjectData:
+        version = data.get("version", "1.0")
+        if version not in cls._KNOWN_VERSIONS:
+            logger.warning("Unrecognized project version %r, loading anyway", version)
         return cls(
-            version=data.get("version", "1.0"),
+            version=version,
             slide_path=data.get("slide_path", ""),
             annotations_file=data.get("annotations_file", ""),
             view_state=data.get("view_state", {}),
@@ -165,9 +172,24 @@ class ProjectManager(QObject):
         # Update modified time
         self._project.modified_at = datetime.now(timezone.utc).isoformat()
 
+        # Atomic save: write to temp file in same directory, then rename.
+        # os.replace() is atomic on both POSIX and Windows (same filesystem).
         try:
-            with open(self._project_path, "w") as f:
-                json.dump(self._project.to_dict(), f, indent=2)
+            target = self._project_path
+            fd, tmp_path = tempfile.mkstemp(
+                dir=target.parent, suffix=".tmp", prefix=target.stem
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._project.to_dict(), f, indent=2)
+                os.replace(tmp_path, target)
+            except BaseException:
+                # Clean up temp file on any failure (including KeyboardInterrupt)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
             self._set_dirty(False)
             self.projectSaved.emit()
@@ -194,13 +216,15 @@ class ProjectManager(QObject):
             y: Viewport Y position
             scale: Current zoom scale
         """
-        if self._project:
-            self._project.view_state = {
-                "x": x,
-                "y": y,
-                "scale": scale,
-            }
-            self._set_dirty(True)
+        if not self._project:
+            logger.debug("updateViewState called with no project loaded")
+            return
+        self._project.view_state = {
+            "x": x,
+            "y": y,
+            "scale": scale,
+        }
+        self._set_dirty(True)
 
     @Slot(result="QVariant")
     def getViewState(self) -> dict | None:

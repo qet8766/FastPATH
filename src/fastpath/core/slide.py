@@ -32,7 +32,6 @@ class SlideManager(QObject):
     Provides tile loading, level selection, and viewport calculations
     for the QML viewer.
 
-    Supports both traditional (levels/) and dzsave (slide_files/) tile formats.
     """
 
     slideLoaded = Signal()
@@ -47,7 +46,8 @@ class SlideManager(QObject):
         self._tile_cache: OrderedDict[TileCoord, QImage] = OrderedDict()
         self._cache_size = PYTHON_TILE_CACHE_SIZE
         self._cache_lock = threading.Lock()  # Thread safety for cache access
-        self._tile_format: str = "traditional"  # "traditional" or "dzsave"
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     @Slot(str)
     def load(self, path: str) -> bool:
@@ -89,9 +89,6 @@ class SlideManager(QObject):
             self._fastpath_dir = path
             self._levels = levels
 
-            # Detect tile format
-            self._tile_format = self._metadata.get("tile_format", "traditional")
-
             self._tile_cache.clear()
             self.slideLoaded.emit()
             return True
@@ -109,7 +106,6 @@ class SlideManager(QObject):
         self._metadata = None
         self._levels = []
         self._tile_cache.clear()
-        self._tile_format = "traditional"
         self.slideClosed.emit()
 
     @Property(bool, notify=slideLoaded)
@@ -186,7 +182,8 @@ class SlideManager(QObject):
 
         target_downsample = 1.0 / scale
 
-        # Pick level with largest downsample that's still <= target
+        # Linear scan is fine here: pyramids have 5-10 levels at most,
+        # so O(n) is faster than maintaining a sorted structure.
         best = None
         for level_info in self._levels:
             if level_info.downsample <= target_downsample:
@@ -263,9 +260,7 @@ class SlideManager(QObject):
         return None
 
     def _get_tile_path_internal(self, level: int, col: int, row: int) -> Path | None:
-        """Get the file path for a tile (internal method).
-
-        Handles both traditional (levels/) and dzsave (slide_files/) formats.
+        """Get the file path for a tile.
 
         Args:
             level: Pyramid level number
@@ -278,12 +273,7 @@ class SlideManager(QObject):
         if not self._fastpath_dir:
             return None
 
-        if self._tile_format == "dzsave":
-            # Level number matches dzsave directory name directly
-            tile_path = self._fastpath_dir / "tiles_files" / str(level) / f"{col}_{row}.jpg"
-        else:
-            # Traditional format: levels/N/col_row.jpg
-            tile_path = self._fastpath_dir / "levels" / str(level) / f"{col}_{row}.jpg"
+        tile_path = self._fastpath_dir / "tiles_files" / str(level) / f"{col}_{row}.jpg"
 
         if tile_path.exists():
             return tile_path
@@ -317,6 +307,70 @@ class SlideManager(QObject):
         tile_path = self._get_tile_path_internal(level, col, row)
         return str(tile_path) if tile_path else ""
 
+    def _cache_get(self, coord: TileCoord) -> QImage | None:
+        """Thread-safe LRU cache lookup.
+
+        Returns:
+            Cached QImage or None on miss.
+        """
+        with self._cache_lock:
+            if coord in self._tile_cache:
+                self._tile_cache.move_to_end(coord)
+                self._cache_hits += 1
+                return self._tile_cache[coord]
+            self._cache_misses += 1
+        return None
+
+    def _cache_put(self, coord: TileCoord, image: QImage) -> None:
+        """Thread-safe LRU cache insertion with eviction."""
+        with self._cache_lock:
+            if coord not in self._tile_cache:
+                if len(self._tile_cache) >= self._cache_size:
+                    self._tile_cache.popitem(last=False)
+                self._tile_cache[coord] = image
+
+    def _load_tile_from_disk(self, tile_path: Path) -> QImage | None:
+        """Load a tile image from disk, trying pyvips first with QImage fallback.
+
+        Args:
+            tile_path: Path to the JPEG tile file.
+
+        Returns:
+            QImage in RGB888 format, or None on failure.
+        """
+        if is_vips_available():
+            vips_img = pyvips.Image.new_from_file(str(tile_path), access="sequential")
+            if vips_img.bands == 4:
+                vips_img = vips_img.extract_band(0, n=3)
+            elif vips_img.bands == 1:
+                vips_img = vips_img.bandjoin([vips_img, vips_img])
+
+            data = vips_img.write_to_memory()
+            qimage = QImage(
+                data,
+                vips_img.width,
+                vips_img.height,
+                vips_img.width * 3,
+                QImage.Format.Format_RGB888,
+            )
+            # Copy — the pyvips data buffer goes out of scope after this method returns
+            return qimage.copy()
+        else:
+            qimage = QImage(str(tile_path))
+            if qimage.isNull():
+                return None
+            return qimage.convertToFormat(QImage.Format.Format_RGB888)
+
+    def get_cache_stats(self) -> dict:
+        """Return cache hit/miss counts for diagnostics."""
+        with self._cache_lock:
+            return {
+                "hits": self._cache_hits,
+                "misses": self._cache_misses,
+                "size": len(self._tile_cache),
+                "capacity": self._cache_size,
+            }
+
     def getTile(self, level: int, col: int, row: int) -> QImage | None:
         """Get a tile as a QImage.
 
@@ -335,56 +389,20 @@ class SlideManager(QObject):
 
         coord = TileCoord(level, col, row)
 
-        # Thread-safe cache check
-        with self._cache_lock:
-            if coord in self._tile_cache:
-                # Move to end to mark as recently used (LRU behavior)
-                self._tile_cache.move_to_end(coord)
-                return self._tile_cache[coord]
+        cached = self._cache_get(coord)
+        if cached is not None:
+            return cached
 
-        # Load from disk using format-aware path resolution (outside lock - I/O can be slow)
+        # Load from disk (outside lock — I/O can be slow)
         tile_path = self._get_tile_path_internal(level, col, row)
         if tile_path is None:
             return None
 
-        # Load using pyvips and convert to QImage
         try:
-            if is_vips_available():
-                # Load with pyvips
-                vips_img = pyvips.Image.new_from_file(str(tile_path), access="sequential")
-                # Ensure RGB
-                if vips_img.bands == 4:
-                    vips_img = vips_img.extract_band(0, n=3)
-                elif vips_img.bands == 1:
-                    vips_img = vips_img.bandjoin([vips_img, vips_img])
-
-                # Convert to bytes
-                data = vips_img.write_to_memory()
-                qimage = QImage(
-                    data,
-                    vips_img.width,
-                    vips_img.height,
-                    vips_img.width * 3,
-                    QImage.Format.Format_RGB888,
-                )
-                # Make a copy since the data buffer goes out of scope
-                qimage = qimage.copy()
-            else:
-                # Fallback: use QImage directly
-                qimage = QImage(str(tile_path))
-                if qimage.isNull():
-                    return None
-                qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
-
-            # Thread-safe cache insertion with LRU eviction
-            with self._cache_lock:
-                # Check again in case another thread loaded it
-                if coord not in self._tile_cache:
-                    if len(self._tile_cache) >= self._cache_size:
-                        # Remove least recently used (oldest = first item)
-                        self._tile_cache.popitem(last=False)
-                    self._tile_cache[coord] = qimage
-
+            qimage = self._load_tile_from_disk(tile_path)
+            if qimage is None:
+                return None
+            self._cache_put(coord, qimage)
             return qimage
         except FileNotFoundError:
             logger.debug("Tile not found: (%d, %d, %d) at %s", level, col, row, tile_path)
