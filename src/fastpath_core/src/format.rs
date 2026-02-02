@@ -57,7 +57,7 @@ pub struct TilePathResolver {
 
 impl TilePathResolver {
     /// Create a new resolver for a .fastpath directory.
-    pub fn new(fastpath_dir: PathBuf, _metadata: &SlideMetadata) -> TileResult<Self> {
+    pub fn new(fastpath_dir: PathBuf) -> TileResult<Self> {
         Ok(Self { fastpath_dir })
     }
 
@@ -87,31 +87,6 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn create_test_metadata() -> SlideMetadata {
-        SlideMetadata {
-            dimensions: (10000, 10000),
-            tile_size: 512,
-            levels: vec![
-                LevelInfo {
-                    level: 0,
-                    downsample: 1,
-                    cols: 20,
-                    rows: 20,
-                },
-                LevelInfo {
-                    level: 1,
-                    downsample: 2,
-                    cols: 10,
-                    rows: 10,
-                },
-            ],
-            target_mpp: 0.5,
-            target_magnification: 20.0,
-            tile_format: "dzsave".to_string(),
-            source_file: "test.svs".to_string(),
-        }
-    }
-
     #[test]
     fn test_dzsave_format_path() {
         let temp = TempDir::new().unwrap();
@@ -120,8 +95,7 @@ mod tests {
         fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
         fs::write(dir.join("tiles_files/0/5_3.jpg"), b"fake").unwrap();
 
-        let metadata = create_test_metadata();
-        let resolver = TilePathResolver::new(dir.to_path_buf(), &metadata).unwrap();
+        let resolver = TilePathResolver::new(dir.to_path_buf()).unwrap();
 
         let path = resolver.get_tile_path(0, 5, 3);
         assert!(path.is_some());
@@ -137,8 +111,7 @@ mod tests {
 
         fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
 
-        let metadata = create_test_metadata();
-        let resolver = TilePathResolver::new(dir.to_path_buf(), &metadata).unwrap();
+        let resolver = TilePathResolver::new(dir.to_path_buf()).unwrap();
 
         let path = resolver.get_tile_path(0, 99, 99);
         assert!(path.is_some());

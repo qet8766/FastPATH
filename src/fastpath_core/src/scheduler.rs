@@ -3,11 +3,14 @@
 use std::path::PathBuf;
 
 /// Maximum number of visible tiles to load in a single prefetch batch.
-/// Higher values ensure complete coverage at low zoom, but increase I/O load.
+/// Set to 256 to cover a 4K display (3840x2160) at any zoom level:
+/// at 512px tiles that's ~8x4=32 visible tiles, with generous headroom
+/// for HiDPI scaling and partial-tile overlap at edges.
 const MAX_VISIBLE_TILES: usize = 256;
 
-/// Budget for extended (non-visible) prefetch tiles.
-/// These are tiles just outside the viewport for smooth panning.
+/// Budget for extended (non-visible) prefetch tiles beyond the viewport.
+/// These tiles provide smooth panning by pre-loading one tile ring outside
+/// the visible area, covering ~32 tiles for a typical viewport perimeter.
 const EXTENDED_TILE_BUDGET: usize = 32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -125,7 +128,7 @@ impl TileScheduler {
         }
 
         let metadata = SlideMetadata::load(&path)?;
-        let resolver = TilePathResolver::new(path, &metadata)?;
+        let resolver = TilePathResolver::new(path)?;
 
         // Clear cache when loading a new slide
         self.cache.clear();
@@ -175,6 +178,45 @@ impl TileScheduler {
             .unwrap_or((0, 0))
     }
 
+    /// Decode a tile from disk and insert it into the cache.
+    ///
+    /// Checks the cache first to guard against races (another thread may have
+    /// loaded the same tile concurrently). Returns the tile data on success.
+    fn load_tile_into_cache(&self, coord: &TileCoord, path: &std::path::Path) -> Option<TileData> {
+        // Race guard — another thread might have loaded this tile already
+        if let Some(tile) = self.cache.get(coord) {
+            return Some(tile);
+        }
+
+        match decode_tile(path) {
+            Ok(tile) => {
+                self.cache.insert(*coord, tile.clone());
+                Some(tile)
+            }
+            Err(e) => {
+                eprintln!(
+                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    coord.level, coord.col, coord.row, path, e
+                );
+                None
+            }
+        }
+    }
+
+    /// Resolve tile coordinates to filesystem paths.
+    ///
+    /// Filters out coordinates whose paths cannot be resolved (e.g. out-of-bounds).
+    fn collect_tile_paths(resolver: &TilePathResolver, coords: &[TileCoord]) -> Vec<(TileCoord, PathBuf)> {
+        coords
+            .iter()
+            .filter_map(|coord| {
+                resolver
+                    .get_tile_path(coord.level, coord.col, coord.row)
+                    .map(|path| (*coord, path))
+            })
+            .collect()
+    }
+
     /// Get a tile, loading from disk if not cached.
     ///
     /// Returns the tile data or None if the tile doesn't exist.
@@ -192,19 +234,7 @@ impl TileScheduler {
             slide.as_ref()?.resolver.get_tile_path(level, col, row)?
         };
 
-        match decode_tile(&tile_path) {
-            Ok(tile) => {
-                self.cache.insert(coord, tile.clone());
-                Some(tile)
-            }
-            Err(e) => {
-                eprintln!(
-                    "[TILE ERROR] Failed to load {}/{}_{}; path={:?}: {:?}",
-                    level, col, row, tile_path, e
-                );
-                None
-            }
-        }
+        self.load_tile_into_cache(&coord, &tile_path)
     }
 
     /// Update viewport and trigger prefetching.
@@ -277,30 +307,14 @@ impl TileScheduler {
         }
 
         // Resolve paths while holding the lock
-        let tile_paths: Vec<_> = tiles_to_load
-            .iter()
-            .filter_map(|coord| {
-                state
-                    .resolver
-                    .get_tile_path(coord.level, coord.col, coord.row)
-                    .map(|path| (*coord, path))
-            })
-            .collect();
+        let tile_paths = Self::collect_tile_paths(&state.resolver, &tiles_to_load);
 
         // Drop the lock before parallel loading
         drop(slide);
 
         // Load tiles in parallel using rayon
-        let cache = &self.cache;
         tile_paths.par_iter().for_each(|(coord, path)| {
-            // Skip if already cached (another thread might have loaded it)
-            if cache.contains(coord) {
-                return;
-            }
-
-            if let Ok(tile) = decode_tile(path) {
-                cache.insert(*coord, tile);
-            }
+            self.load_tile_into_cache(coord, path);
         });
     }
 
@@ -308,8 +322,10 @@ impl TileScheduler {
     /// This ensures any initial viewport zoom has tiles ready.
     /// Prefetches all levels where total_tiles <= MAX_TILES_PER_LEVEL.
     pub fn prefetch_low_res_levels(&self) {
-        // 64 tiles = 8x8 grid, covers levels 3+ for most slides.
-        // Small enough for fast loading, large enough for smooth initial zoom.
+        // 64 tiles = 8x8 grid — covers the 3-4 lowest-resolution levels of
+        // a typical 100k×100k slide. Keeps warm-up I/O under ~2 MB total
+        // (64 × ~30 KB JPEG) while guaranteeing tiles are ready for any
+        // initial zoom level the user might land on.
         const MAX_TILES_PER_LEVEL: u32 = 64;
 
         let slide = self.slide.read();
@@ -329,18 +345,18 @@ impl TileScheduler {
             }
         }
 
-        let mut tile_paths = Vec::new();
+        let mut all_coords = Vec::new();
         for level in &levels_to_prefetch {
             if let Some(level_info) = state.metadata.get_level(*level) {
                 for row in 0..level_info.rows {
                     for col in 0..level_info.cols {
-                        if let Some(path) = state.resolver.get_tile_path(*level, col, row) {
-                            tile_paths.push((TileCoord::new(*level, col, row), path));
-                        }
+                        all_coords.push(TileCoord::new(*level, col, row));
                     }
                 }
             }
         }
+
+        let tile_paths = Self::collect_tile_paths(&state.resolver, &all_coords);
 
         eprintln!(
             "[PREFETCH] Loading {} tiles from {} levels (max {} tiles/level): {:?}",
@@ -352,25 +368,18 @@ impl TileScheduler {
 
         drop(slide);
 
-        let cache = &self.cache;
         let loaded = std::sync::atomic::AtomicUsize::new(0);
         let failed = std::sync::atomic::AtomicUsize::new(0);
 
         tile_paths.par_iter().for_each(|(coord, path)| {
-            if !cache.contains(coord) {
-                match decode_tile(path) {
-                    Ok(tile) => {
-                        cache.insert(*coord, tile);
-                        loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[PREFETCH ERROR] {}/{}_{}; path={:?}: {:?}",
-                            coord.level, coord.col, coord.row, path, e
-                        );
-                        failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
+            // Skip tiles already in cache — only count fresh loads
+            if self.cache.contains(coord) {
+                return;
+            }
+            if self.load_tile_into_cache(coord, path).is_some() {
+                loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
 

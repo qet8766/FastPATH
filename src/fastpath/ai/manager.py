@@ -310,22 +310,9 @@ class AIPluginManager(QObject):
             width, height: Region size in slide coordinates
             mpp: Microns per pixel
         """
-        if plugin_name not in self._plugins:
-            self.processingError.emit(f"Plugin not found: {plugin_name}")
+        plugin = self._validate_process_request(plugin_name)
+        if plugin is None:
             return
-
-        if self._worker is not None and self._worker.isRunning():
-            self.processingError.emit("Another process is already running")
-            return
-
-        # Clean up any previous worker (even if finished) to prevent memory leaks
-        self._cleanup_worker()
-
-        plugin = self._plugins[plugin_name]
-
-        # Ensure model is loaded
-        if plugin_name not in self._loaded_models:
-            self.loadModel(plugin_name)
 
         # Load region image
         try:
@@ -349,6 +336,45 @@ class AIPluginManager(QObject):
         self.processingStarted.emit(plugin_name)
         self._worker.start()
 
+    def _validate_process_request(self, plugin_name: str) -> AIPlugin | None:
+        """Validate a processing request and prepare the plugin.
+
+        Checks plugin existence, worker availability, cleans up previous workers,
+        and ensures the model is loaded. Returns the plugin instance or None
+        (with error emitted) if validation fails.
+        """
+        if plugin_name not in self._plugins:
+            self.processingError.emit(f"Plugin not found: {plugin_name}")
+            return None
+
+        if self._worker is not None and self._worker.isRunning():
+            self.processingError.emit("Another process is already running")
+            return None
+
+        self._cleanup_worker()
+
+        if plugin_name not in self._loaded_models:
+            self.loadModel(plugin_name)
+
+        return self._plugins[plugin_name]
+
+    @staticmethod
+    def _compute_tile_grid(
+        x: float, y: float, width: float, height: float, tile_size: int
+    ) -> tuple[int, int, int, int, int, int]:
+        """Compute the tile grid range and composite dimensions for a region.
+
+        Returns:
+            (col_start, col_end, row_start, row_end, composite_w, composite_h)
+        """
+        col_start = int(x / tile_size)
+        col_end = int((x + width) / tile_size) + 1
+        row_start = int(y / tile_size)
+        row_end = int((y + height) / tile_size) + 1
+        composite_w = (col_end - col_start) * tile_size
+        composite_h = (row_end - row_start) * tile_size
+        return col_start, col_end, row_start, row_end, composite_w, composite_h
+
     def _load_region(
         self, slide_path: str, x: float, y: float, width: float, height: float
     ) -> np.ndarray:
@@ -360,68 +386,72 @@ class AIPluginManager(QObject):
             if not manager.load(slide_path):
                 raise ValueError(f"Failed to load slide: {slide_path}")
 
-            # Determine best level for the region
-            # For simplicity, use level 0 tiles and composite
             tile_size = manager.tileSize
+            col_start, col_end, row_start, row_end, comp_w, comp_h = (
+                self._compute_tile_grid(x, y, width, height, tile_size)
+            )
 
-            # Calculate tile range
-            col_start = int(x / tile_size)
-            col_end = int((x + width) / tile_size) + 1
-            row_start = int(y / tile_size)
-            row_end = int((y + height) / tile_size) + 1
-
-            # Create composite using pyvips or numpy
-            composite_width = (col_end - col_start) * tile_size
-            composite_height = (row_end - row_start) * tile_size
+            crop_x = int(x - col_start * tile_size)
+            crop_y = int(y - row_start * tile_size)
 
             if is_vips_available() and pyvips is not None:
-                # Use pyvips for compositing
-                bg_color = (255, 255, 255)
-                composite = VIPSBackend.new_rgb(composite_width, composite_height, bg_color)
-
-                for row in range(row_start, row_end):
-                    for col in range(col_start, col_end):
-                        tile_path = manager.getTilePath(0, col, row)
-                        if tile_path:
-                            tile = pyvips.Image.new_from_file(tile_path, access="sequential")
-                            # Ensure RGB
-                            if tile.bands == 4:
-                                tile = tile.extract_band(0, n=3)
-                            paste_x = (col - col_start) * tile_size
-                            paste_y = (row - row_start) * tile_size
-                            composite = composite.insert(tile, paste_x, paste_y)
-
-                # Crop to exact region
-                crop_x = int(x - col_start * tile_size)
-                crop_y = int(y - row_start * tile_size)
+                composite = self._composite_with_vips(
+                    manager, col_start, col_end, row_start, row_end, tile_size, comp_w, comp_h
+                )
                 composite = composite.crop(crop_x, crop_y, int(width), int(height))
-
-                # Convert to numpy
                 return VIPSBackend.to_numpy(composite)
             else:
-                # Fallback: use numpy directly
-                composite = np.full((composite_height, composite_width, 3), 255, dtype=np.uint8)
-
-                for row in range(row_start, row_end):
-                    for col in range(col_start, col_end):
-                        tile = manager.getTile(0, col, row)
-                        if tile is not None:
-                            # Convert QImage to numpy
-                            tile = tile.convertToFormat(tile.Format.Format_RGB888)
-                            # Make explicit copy - tile buffer is temporary and will be freed
-                            # when tile goes out of scope, causing use-after-free if not copied
-                            arr = np.array(tile.bits()).reshape(tile.height(), tile.width(), 3).copy()
-                            paste_x = (col - col_start) * tile_size
-                            paste_y = (row - row_start) * tile_size
-                            composite[paste_y:paste_y + tile_size, paste_x:paste_x + tile_size] = arr
-
-                # Crop to exact region
-                crop_x = int(x - col_start * tile_size)
-                crop_y = int(y - row_start * tile_size)
+                composite = self._composite_with_numpy(
+                    manager, col_start, col_end, row_start, row_end, tile_size, comp_w, comp_h
+                )
                 return composite[crop_y:crop_y + int(height), crop_x:crop_x + int(width)]
         finally:
-            # Always close the manager to prevent resource leaks
             manager.close()
+
+    @staticmethod
+    def _composite_with_vips(
+        manager: Any,
+        col_start: int, col_end: int,
+        row_start: int, row_end: int,
+        tile_size: int,
+        comp_w: int, comp_h: int,
+    ) -> Any:
+        """Composite tiles into a pyvips image."""
+        composite = VIPSBackend.new_rgb(comp_w, comp_h, (255, 255, 255))
+        for row in range(row_start, row_end):
+            for col in range(col_start, col_end):
+                tile_path = manager.getTilePath(0, col, row)
+                if tile_path:
+                    tile = pyvips.Image.new_from_file(tile_path, access="sequential")
+                    if tile.bands == 4:
+                        tile = tile.extract_band(0, n=3)
+                    paste_x = (col - col_start) * tile_size
+                    paste_y = (row - row_start) * tile_size
+                    composite = composite.insert(tile, paste_x, paste_y)
+        return composite
+
+    @staticmethod
+    def _composite_with_numpy(
+        manager: Any,
+        col_start: int, col_end: int,
+        row_start: int, row_end: int,
+        tile_size: int,
+        comp_w: int, comp_h: int,
+    ) -> np.ndarray:
+        """Composite tiles into a numpy array (fallback when pyvips unavailable)."""
+        composite = np.full((comp_h, comp_w, 3), 255, dtype=np.uint8)
+        for row in range(row_start, row_end):
+            for col in range(col_start, col_end):
+                tile = manager.getTile(0, col, row)
+                if tile is not None:
+                    tile = tile.convertToFormat(tile.Format.Format_RGB888)
+                    # Make explicit copy - tile buffer is temporary and will be freed
+                    # when tile goes out of scope, causing use-after-free if not copied
+                    arr = np.array(tile.bits()).reshape(tile.height(), tile.width(), 3).copy()
+                    paste_x = (col - col_start) * tile_size
+                    paste_y = (row - row_start) * tile_size
+                    composite[paste_y:paste_y + tile_size, paste_x:paste_x + tile_size] = arr
+        return composite
 
     def _on_processing_finished(self, result: dict) -> None:
         """Handle processing completion."""

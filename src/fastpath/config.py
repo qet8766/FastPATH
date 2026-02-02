@@ -108,6 +108,11 @@ WSI_EXTENSIONS: frozenset[str] = frozenset({
 # UI Configuration
 # =============================================================================
 
+#: Cache miss threshold — if more than this fraction of visible tiles are
+#: uncached, show all tiles immediately rather than waiting for cache
+#: (avoids prolonged gray screen at low zoom levels)
+CACHE_MISS_THRESHOLD: float = 0.3
+
 #: Maximum recent files to remember
 MAX_RECENT_FILES: int = 10
 

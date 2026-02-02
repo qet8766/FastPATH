@@ -20,6 +20,13 @@ from fastpath.config import MAX_RECENT_FILES
 
 logger = logging.getLogger(__name__)
 
+# Status constants for file processing (Python-side only; QML uses string literals)
+STATUS_PENDING = "pending"
+STATUS_PROCESSING = "processing"
+STATUS_DONE = "done"
+STATUS_SKIPPED = "skipped"
+STATUS_ERROR = "error"
+
 
 class TileModel(QAbstractListModel):
     """Model for visible tiles in the viewport.
@@ -35,6 +42,17 @@ class TileModel(QAbstractListModel):
     WidthRole = Qt.ItemDataRole.UserRole + 6
     HeightRole = Qt.ItemDataRole.UserRole + 7
     SourceRole = Qt.ItemDataRole.UserRole + 8
+
+    _ROLE_KEYS: dict[int, str] = {
+        LevelRole: "level",
+        ColRole: "col",
+        RowRole: "row",
+        XRole: "x",
+        YRole: "y",
+        WidthRole: "width",
+        HeightRole: "height",
+        SourceRole: "source",
+    }
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -53,39 +71,11 @@ class TileModel(QAbstractListModel):
         return len(self._tiles)
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
-        """Return data for the given model index and role.
-
-        This is the core Qt model method called by QML views to retrieve
-        tile information for rendering.
-
-        Args:
-            index: Model index specifying which tile row
-            role: Data role (LevelRole, ColRole, RowRole, XRole, etc.)
-
-        Returns:
-            The requested data value, or None if index is invalid
-        """
+        """Return data for the given model index and role."""
         if not index.isValid() or index.row() >= len(self._tiles):
             return None
-
-        tile = self._tiles[index.row()]
-        if role == self.LevelRole:
-            return tile["level"]
-        elif role == self.ColRole:
-            return tile["col"]
-        elif role == self.RowRole:
-            return tile["row"]
-        elif role == self.XRole:
-            return tile["x"]
-        elif role == self.YRole:
-            return tile["y"]
-        elif role == self.WidthRole:
-            return tile["width"]
-        elif role == self.HeightRole:
-            return tile["height"]
-        elif role == self.SourceRole:
-            return tile["source"]
-        return None
+        key = self._ROLE_KEYS.get(role)
+        return self._tiles[index.row()][key] if key else None
 
     def roleNames(self) -> dict:
         return {
@@ -204,6 +194,14 @@ class FileListModel(QAbstractListModel):
     ProgressRole = Qt.ItemDataRole.UserRole + 4
     ErrorMessageRole = Qt.ItemDataRole.UserRole + 5
 
+    _ROLE_KEYS: dict[int, str] = {
+        FileNameRole: "fileName",
+        FilePathRole: "filePath",
+        StatusRole: "status",
+        ProgressRole: "progress",
+        ErrorMessageRole: "errorMessage",
+    }
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._files: list[dict] = []
@@ -214,19 +212,14 @@ class FileListModel(QAbstractListModel):
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         if not index.isValid() or index.row() >= len(self._files):
             return None
+        key = self._ROLE_KEYS.get(role)
+        if key is None:
+            return None
+        return self._files[index.row()].get(key, "")
 
-        file = self._files[index.row()]
-        if role == self.FileNameRole:
-            return file["fileName"]
-        elif role == self.FilePathRole:
-            return file["filePath"]
-        elif role == self.StatusRole:
-            return file["status"]
-        elif role == self.ProgressRole:
-            return file["progress"]
-        elif role == self.ErrorMessageRole:
-            return file.get("errorMessage", "")
-        return None
+    def _valid_index(self, index: int) -> bool:
+        """Check if index is within the file list bounds."""
+        return 0 <= index < len(self._files)
 
     def roleNames(self) -> dict:
         return {
@@ -249,7 +242,7 @@ class FileListModel(QAbstractListModel):
             {
                 "fileName": Path(f).name,
                 "filePath": f,
-                "status": "pending",
+                "status": STATUS_PENDING,
                 "progress": 0.0,
                 "errorMessage": "",
             }
@@ -259,40 +252,25 @@ class FileListModel(QAbstractListModel):
 
     @Slot(int, str)
     def setStatus(self, index: int, status: str) -> None:
-        """Update the status of a file.
-
-        Args:
-            index: File index in the list
-            status: New status (pending, processing, done, skipped, error)
-        """
-        if 0 <= index < len(self._files):
+        """Update the status of a file."""
+        if self._valid_index(index):
             self._files[index]["status"] = status
             model_index = self.index(index, 0)
             self.dataChanged.emit(model_index, model_index, [self.StatusRole])
 
     @Slot(int, float)
     def setProgress(self, index: int, progress: float) -> None:
-        """Update the progress of a file.
-
-        Args:
-            index: File index in the list
-            progress: Progress value (0.0-1.0)
-        """
-        if 0 <= index < len(self._files):
+        """Update the progress of a file."""
+        if self._valid_index(index):
             self._files[index]["progress"] = progress
             model_index = self.index(index, 0)
             self.dataChanged.emit(model_index, model_index, [self.ProgressRole])
 
     @Slot(int, str)
     def setError(self, index: int, message: str) -> None:
-        """Set error status and message for a file.
-
-        Args:
-            index: File index in the list
-            message: Error message
-        """
-        if 0 <= index < len(self._files):
-            self._files[index]["status"] = "error"
+        """Set error status and message for a file."""
+        if self._valid_index(index):
+            self._files[index]["status"] = STATUS_ERROR
             self._files[index]["errorMessage"] = message
             model_index = self.index(index, 0)
             self.dataChanged.emit(
@@ -308,7 +286,7 @@ class FileListModel(QAbstractListModel):
 
     def getFilePath(self, index: int) -> str:
         """Get the file path at the given index."""
-        if 0 <= index < len(self._files):
+        if self._valid_index(index):
             return self._files[index]["filePath"]
         return ""
 

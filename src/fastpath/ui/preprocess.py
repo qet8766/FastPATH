@@ -8,7 +8,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Property, QThread, Slot
 
-from fastpath.ui.models import FileListModel
+from fastpath.config import WSI_EXTENSIONS
+from fastpath.ui.models import (
+    FileListModel,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    STATUS_DONE,
+    STATUS_SKIPPED,
+    STATUS_ERROR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +31,17 @@ def _normalize_file_url(path: str) -> str:
     elif path.startswith("file://"):
         return path[7:]
     return path
+
+
+def _map_stage_to_progress(stage: str, current: int, total: int) -> float:
+    """Map preprocessing stage name to a progress value (0.0-1.0)."""
+    if stage == "thumbnail":
+        return 0.1
+    elif stage == "dzsave":
+        return 0.8
+    elif stage.startswith("level_"):
+        return 0.8 + 0.15 * (current / max(total, 1))
+    return 0.5
 
 
 class PreprocessWorker(QThread):
@@ -74,15 +93,7 @@ class PreprocessWorker(QThread):
             def progress_callback(stage: str, current: int, total: int) -> None:
                 if self._cancelled:
                     raise InterruptedError("Preprocessing cancelled")
-                # Map stages to progress ranges
-                if stage == "thumbnail":
-                    progress = 0.1
-                elif stage == "dzsave":
-                    progress = 0.8
-                elif stage.startswith("level_"):
-                    progress = 0.8 + 0.15 * (current / max(total, 1))
-                else:
-                    progress = 0.5
+                progress = _map_stage_to_progress(stage, current, total)
                 self.progressChanged.emit(progress, f"{stage}: {current}/{total}")
 
             self.progressChanged.emit(0.1, "Processing slide...")
@@ -157,9 +168,9 @@ class BatchPreprocessWorker(QThread):
         def process_file(index: int, file_path: str) -> tuple[int, str, str | None]:
             """Process a single file. Returns (index, status, error_message)."""
             if self._cancelled:
-                return (index, "pending", None)
+                return (index, STATUS_PENDING, None)
 
-            self.fileStatusChanged.emit(index, "processing")
+            self.fileStatusChanged.emit(index, STATUS_PROCESSING)
             self.fileProgress.emit(index, 0.0)
 
             try:
@@ -172,7 +183,7 @@ class BatchPreprocessWorker(QThread):
 
                 if status == PyramidStatus.COMPLETE and not self._force:
                     self.fileProgress.emit(index, 1.0)
-                    return (index, "skipped", None)
+                    return (index, STATUS_SKIPPED, None)
 
                 # Build pyramid
                 builder = VipsPyramidBuilder(tile_size=self._tile_size)
@@ -180,10 +191,7 @@ class BatchPreprocessWorker(QThread):
                 def progress_cb(stage: str, current: int, total: int) -> None:
                     if self._cancelled:
                         raise InterruptedError("Cancelled")
-                    if stage == "dzsave":
-                        self.fileProgress.emit(index, 0.8)
-                    elif stage == "thumbnail":
-                        self.fileProgress.emit(index, 0.1)
+                    self.fileProgress.emit(index, _map_stage_to_progress(stage, current, total))
 
                 result = builder.build(
                     slide_path,
@@ -195,14 +203,14 @@ class BatchPreprocessWorker(QThread):
                 self.fileProgress.emit(index, 1.0)
 
                 if result is None:
-                    return (index, "skipped", None)
-                return (index, "done", None)
+                    return (index, STATUS_SKIPPED, None)
+                return (index, STATUS_DONE, None)
 
             except InterruptedError:
-                return (index, "pending", "Cancelled")
+                return (index, STATUS_PENDING, "Cancelled")
             except Exception as e:
                 logger.exception("Error processing %s", file_path)
-                return (index, "error", str(e))
+                return (index, STATUS_ERROR, str(e))
 
         # Process files in parallel using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=self._parallel) as executor:
@@ -218,11 +226,11 @@ class BatchPreprocessWorker(QThread):
                 index, status, error_msg = future.result()
                 self.fileStatusChanged.emit(index, status)
 
-                if status == "done":
+                if status == STATUS_DONE:
                     processed += 1
-                elif status == "skipped":
+                elif status == STATUS_SKIPPED:
                     skipped += 1
-                elif status == "error":
+                elif status == STATUS_ERROR:
                     errors += 1
                     file_name = Path(self._files[index]).name
                     error_details.append((file_name, error_msg or "Unknown error"))
@@ -289,6 +297,29 @@ class PreprocessController(QObject):
 
         # Settings with defaults
         self._tile_size = 512
+
+    def _set_processing_active(self, status: str) -> None:
+        """Set processing state to active with the given status message."""
+        self._is_processing = True
+        self.isProcessingChanged.emit()
+        self._status = status
+        self.statusChanged.emit()
+
+    def _reset_batch_state(self) -> None:
+        """Reset batch counters and progress to initial values."""
+        self._overall_progress = 0.0
+        self.overallProgressChanged.emit()
+        self._processed_count = 0
+        self.processedCountChanged.emit()
+        self._skipped_count = 0
+        self.skippedCountChanged.emit()
+        self._error_count = 0
+        self.errorCountChanged.emit()
+        self._batch_complete = False
+        self.batchCompleteChanged.emit()
+        self._first_result_path = ""
+        self.firstResultPathChanged.emit()
+        self._error_details = []
 
     @Property(bool, notify=isProcessingChanged)
     def isProcessing(self) -> bool:
@@ -435,12 +466,9 @@ class PreprocessController(QObject):
             self.errorOccurred.emit(f"Input file not found: {self._input_file}")
             return
 
-        self._is_processing = True
-        self.isProcessingChanged.emit()
+        self._set_processing_active("Starting...")
         self._progress = 0.0
         self.progressChanged.emit()
-        self._status = "Starting..."
-        self.statusChanged.emit()
         self._result_path = ""
         self.resultPathChanged.emit()
 
@@ -493,11 +521,8 @@ class PreprocessController(QObject):
             self._file_list_model.clear()
             return
 
-        # Common WSI extensions
-        wsi_extensions = {".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".vms", ".vmu", ".scn"}
-
         files = []
-        for ext in wsi_extensions:
+        for ext in WSI_EXTENSIONS:
             files.extend(folder.glob(f"*{ext}"))
             files.extend(folder.glob(f"*{ext.upper()}"))
 
@@ -531,23 +556,8 @@ class PreprocessController(QObject):
             return
 
         # Reset batch state
-        self._is_processing = True
-        self.isProcessingChanged.emit()
-        self._overall_progress = 0.0
-        self.overallProgressChanged.emit()
-        self._processed_count = 0
-        self.processedCountChanged.emit()
-        self._skipped_count = 0
-        self.skippedCountChanged.emit()
-        self._error_count = 0
-        self.errorCountChanged.emit()
-        self._batch_complete = False
-        self.batchCompleteChanged.emit()
-        self._first_result_path = ""
-        self.firstResultPathChanged.emit()
-        self._error_details = []
-        self._status = "Starting batch..."
-        self.statusChanged.emit()
+        self._reset_batch_state()
+        self._set_processing_active("Starting batch...")
 
         # Create and start batch worker
         self._batch_worker = BatchPreprocessWorker(
@@ -568,7 +578,7 @@ class PreprocessController(QObject):
         """Handle file status update from batch worker."""
         self._file_list_model.setStatus(index, status)
         # Track first successful result for "Open in Viewer"
-        if status == "done" and not self._first_result_path:
+        if status == STATUS_DONE and not self._first_result_path:
             file_path = self._file_list_model.getFilePath(index)
             if file_path:
                 pyramid_name = Path(file_path).stem + ".fastpath"
@@ -611,18 +621,7 @@ class PreprocessController(QObject):
     @Slot()
     def resetBatch(self) -> None:
         """Reset batch state to start a new batch."""
-        self._batch_complete = False
-        self.batchCompleteChanged.emit()
-        self._overall_progress = 0.0
-        self.overallProgressChanged.emit()
-        self._processed_count = 0
-        self.processedCountChanged.emit()
-        self._skipped_count = 0
-        self.skippedCountChanged.emit()
-        self._error_count = 0
-        self.errorCountChanged.emit()
-        self._first_result_path = ""
-        self.firstResultPathChanged.emit()
+        self._reset_batch_state()
         self._file_list_model.clear()
         self._input_folder = ""
         self.inputFolderChanged.emit()

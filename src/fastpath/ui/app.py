@@ -12,7 +12,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE
+from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
 from fastpath.ai.manager import AIPluginManager
@@ -24,10 +24,6 @@ from fastpath.ui.preprocess import PreprocessController, _normalize_file_url
 from fastpath_core import RustTileScheduler
 
 logger = logging.getLogger(__name__)
-
-# Threshold for cache miss ratio - if more than this fraction of tiles are uncached,
-# show all tiles immediately rather than waiting for cache (avoids gray screen)
-CACHE_MISS_THRESHOLD = 0.3
 
 
 class AppController(QObject):
@@ -274,34 +270,39 @@ class AppController(QObject):
             len(tile_coords)
         )
 
-        # On first render, show all visible tiles (don't filter to cached-only)
-        # Only consume the flag if we actually have tiles to render
+        cached_coords = self._filter_cached_tiles(tile_coords)
+        tiles = self._build_tile_data(cached_coords)
+        self._update_fallback_on_level_change()
+        self._tile_model.batchUpdate(tiles)
+
+    def _filter_cached_tiles(self, tile_coords: list) -> list:
+        """Filter tile coordinates to only those already in cache.
+
+        On initial render, returns all tiles unfiltered. Otherwise filters
+        through the Rust scheduler's cache, falling back to all tiles when
+        the cache miss ratio exceeds CACHE_MISS_THRESHOLD.
+        """
         if self._needs_initial_render:
             if tile_coords:
-                cached_coords = tile_coords  # Don't filter - let provider load them
                 self._needs_initial_render = False
-            else:
-                # Viewport not ready yet, keep flag for next update
-                cached_coords = []
-        elif self._rust_scheduler.is_loaded:
-            # Filter to only show tiles that are already cached
-            # This prevents flickering - fallback layer shows previous tiles for uncached regions
+                return tile_coords
+            return []
+
+        if self._rust_scheduler.is_loaded:
             tile_tuples = [tuple(coord) for coord in tile_coords]
             cached_coords = self._rust_scheduler.filter_cached_tiles(tile_tuples)
-
-            # If most tiles are uncached, show all and let provider load them
-            # This avoids prolonged gray screen at low zoom levels
             if tile_coords and len(cached_coords) < len(tile_coords) * CACHE_MISS_THRESHOLD:
-                cached_coords = tile_coords
-        else:
-            cached_coords = tile_coords
+                return tile_coords
+            return cached_coords
 
-        # Build tile data for cached tiles only
+        return tile_coords
+
+    def _build_tile_data(self, coords: list) -> list[dict]:
+        """Convert tile coordinates into tile dicts with position and source URL."""
         tiles = []
-        for coord in cached_coords:
+        for coord in coords:
             level, col, row = coord
             pos = self._slide_manager.getTilePosition(level, col, row)
-            source = f"image://tiles/{level}/{col}_{row}"
             tiles.append({
                 "level": level,
                 "col": col,
@@ -310,18 +311,17 @@ class AppController(QObject):
                 "y": pos[1],
                 "width": pos[2],
                 "height": pos[3],
-                "source": source,
+                "source": f"image://tiles/{level}/{col}_{row}",
             })
+        return tiles
 
-        # Only update fallback on level change (not during panning)
+    def _update_fallback_on_level_change(self) -> None:
+        """Copy current tiles to fallback model when the pyramid level changes."""
         current_level = self._slide_manager.getLevelForScale(self._scale)
         if current_level != self._previous_level:
             if self._tile_model.hasTiles():
                 self._fallback_tile_model.batchUpdate(self._tile_model.getTiles())
             self._previous_level = current_level
-
-        # Use batch update for main model (single signal instead of per-tile)
-        self._tile_model.batchUpdate(tiles)
 
     def _on_slide_loaded(self) -> None:
         """Handle slide loaded signal."""
