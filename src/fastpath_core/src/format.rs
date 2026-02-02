@@ -23,10 +23,6 @@ pub struct SlideMetadata {
     pub levels: Vec<LevelInfo>,
     pub target_mpp: f64,
     pub target_magnification: f64,
-    #[serde(default)]
-    pub tile_format: String,
-    #[serde(default)]
-    pub source_file: String,
 }
 
 impl SlideMetadata {

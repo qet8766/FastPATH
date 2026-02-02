@@ -37,8 +37,8 @@ src/fastpath/
 src/fastpath_core/     # Rust extension (VIEWER ONLY) — PyO3/maturin
 └── src/
     ├── scheduler.rs   # RustTileScheduler (caching, prefetching)
-    ├── cache.rs       # DashMap tile cache + Mutex VecDeque LRU eviction
-    ├── prefetch.rs    # Background thread, crossbeam channel, rayon thread pool
+    ├── cache.rs       # moka tile cache (TinyLFU eviction)
+    ├── prefetch.rs    # Viewport-based prefetching, rayon thread pool
     ├── decoder.rs     # zune-jpeg SIMD-accelerated JPEG decoding
     ├── format.rs, error.rs, lib.rs
 ```
@@ -69,10 +69,10 @@ If SlideManager loads first, `slideLoaded` triggers QML tile requests before the
 ### Dual-cache architecture
 
 Tiles are cached in two layers:
-1. **Rust DashMap** (12GB default) — primary cache, lock-free concurrent, LRU eviction via `VecDeque`
+1. **Rust moka** (12GB default) — primary cache, concurrent, TinyLFU eviction
 2. **Python OrderedDict** (256 tiles default) — secondary LRU in `SlideManager`, keyed by `TileCoord`
 
-The `CACHE_MISS_THRESHOLD = 0.3` in `app.py` controls tile visibility: if >30% of visible tiles are uncached, all tiles render immediately (avoids prolonged gray screen at low zoom). A `_fallback_tile_model` shows previous-level tiles during zoom transitions.
+The `CACHE_MISS_THRESHOLD = 0.3` in `config.py` controls tile visibility: if >30% of visible tiles are uncached, all tiles render immediately (avoids prolonged gray screen at low zoom). A `_fallback_tile_model` shows previous-level tiles during zoom transitions.
 
 ## Preprocessing
 
@@ -101,7 +101,7 @@ The Rust release build uses `lto = true` and `codegen-units = 1` for maximum opt
 ## Code Conventions
 
 - **Python**: PySide6 (not PyQt6), `pathlib.Path`, type hints throughout, build system is Hatchling
-- **Rust**: PyO3 0.23 with `abi3-py311`, rayon for parallelism, parking_lot for locks, crossbeam for channels, `bytes::Bytes` for zero-copy tile data
+- **Rust**: PyO3 0.23 with `abi3-py311`, rayon for parallelism, parking_lot for locks, moka for caching, zune-jpeg for SIMD JPEG decoding, `bytes::Bytes` for zero-copy tile data
 - **QML**: `Theme.qml` singleton for colors/fonts, Fusion style
 - **Signals**: Qt signals for cross-component communication (`slideLoaded`, `errorOccurred`)
 - **Testing**: Use `uv run python -m pytest` (not `uv run pytest`); use `mock_fastpath_dir` fixture for slide tests; Qt tests need a session-scoped `qapp` fixture (`QApplication` instance)

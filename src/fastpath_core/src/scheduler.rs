@@ -12,11 +12,8 @@ const MAX_VISIBLE_TILES: usize = 256;
 /// These tiles provide smooth panning by pre-loading one tile ring outside
 /// the visible area, covering ~32 tiles for a typical viewport perimeter.
 const EXTENDED_TILE_BUDGET: usize = 32;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
@@ -25,11 +22,6 @@ use crate::decoder::{decode_tile, TileData};
 use crate::error::{TileError, TileResult};
 use crate::format::{SlideMetadata, TilePathResolver};
 use crate::prefetch::{PrefetchCalculator, PrefetchConfig, Viewport};
-
-/// Prefetch request sent to the background worker.
-struct PrefetchRequest {
-    viewport: Viewport,
-}
 
 /// Internal slide state.
 struct SlideState {
@@ -45,12 +37,6 @@ pub struct TileScheduler {
     slide: RwLock<Option<SlideState>>,
     /// Prefetch calculator.
     prefetch_calc: PrefetchCalculator,
-    /// Channel to send prefetch requests to background worker.
-    prefetch_tx: Sender<PrefetchRequest>,
-    /// Flag to signal shutdown.
-    shutdown: Arc<AtomicBool>,
-    /// Background prefetch thread handle.
-    prefetch_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TileScheduler {
@@ -61,7 +47,6 @@ impl TileScheduler {
     /// * `prefetch_distance` - Number of tiles to prefetch ahead
     pub fn new(cache_size_mb: usize, prefetch_distance: u32) -> Self {
         let cache = Arc::new(TileCache::new(cache_size_mb));
-        let shutdown = Arc::new(AtomicBool::new(false));
 
         let prefetch_config = PrefetchConfig {
             tiles_ahead: prefetch_distance,
@@ -69,50 +54,10 @@ impl TileScheduler {
         };
         let prefetch_calc = PrefetchCalculator::new(prefetch_config);
 
-        // Create channel for prefetch requests
-        let (prefetch_tx, prefetch_rx) = bounded::<PrefetchRequest>(4);
-
-        // Spawn background prefetch worker
-        let worker_cache = Arc::clone(&cache);
-        let worker_shutdown = Arc::clone(&shutdown);
-
-        let prefetch_handle = Some(thread::spawn(move || {
-            Self::prefetch_worker(worker_cache, prefetch_rx, worker_shutdown);
-        }));
-
         Self {
             cache,
             slide: RwLock::new(None),
             prefetch_calc,
-            prefetch_tx,
-            shutdown,
-            prefetch_handle,
-        }
-    }
-
-    /// Background worker that processes prefetch requests.
-    ///
-    /// Currently a placeholder for future async prefetching. The worker receives
-    /// viewport updates but actual prefetching is done synchronously in
-    /// `prefetch_for_viewport()` which has access to slide state. This worker
-    /// architecture is preserved to enable future improvements like:
-    /// - Decoupled prefetch timing from UI thread
-    /// - Speculative prefetching based on velocity prediction
-    /// - Background cache warming during idle periods
-    fn prefetch_worker(
-        _cache: Arc<TileCache>,
-        rx: Receiver<PrefetchRequest>,
-        shutdown: Arc<AtomicBool>,
-    ) {
-        while !shutdown.load(Ordering::Relaxed) {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(_request) => {
-                    // TODO: Implement async prefetching here when slide state
-                    // can be safely accessed from background thread
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-            }
         }
     }
 
@@ -249,13 +194,6 @@ impl TileScheduler {
         velocity_y: f64,
     ) {
         let viewport = Viewport::new(x, y, width, height, scale, velocity_x, velocity_y);
-
-        // Send to background worker (non-blocking)
-        let _ = self.prefetch_tx.try_send(PrefetchRequest {
-            viewport: viewport.clone(),
-        });
-
-        // Also do immediate prefetching for visible tiles
         self.prefetch_for_viewport(&viewport);
     }
 
@@ -390,12 +328,6 @@ impl TileScheduler {
         );
     }
 
-    /// Check if a tile is in the cache without loading it.
-    pub fn is_tile_cached(&self, level: u32, col: u32, row: u32) -> bool {
-        let coord = TileCoord::new(level, col, row);
-        self.cache.contains(&coord)
-    }
-
     /// Check which tiles from a list are cached.
     /// Returns a vector of (level, col, row) for tiles that are in cache.
     pub fn filter_cached_tiles(&self, tiles: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
@@ -437,18 +369,6 @@ impl TileScheduler {
                 .get_level(level)
                 .map(|l| (l.downsample, l.cols, l.rows))
         })
-    }
-}
-
-impl Drop for TileScheduler {
-    fn drop(&mut self) {
-        // Signal shutdown
-        self.shutdown.store(true, Ordering::Relaxed);
-
-        // Wait for background thread to finish
-        if let Some(handle) = self.prefetch_handle.take() {
-            let _ = handle.join();
-        }
     }
 }
 

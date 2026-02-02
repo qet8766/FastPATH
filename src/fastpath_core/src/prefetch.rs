@@ -315,8 +315,6 @@ mod tests {
             ],
             target_mpp: 0.5,
             target_magnification: 20.0,
-            tile_format: "dzsave".to_string(),
-            source_file: String::new(),
         }
     }
 

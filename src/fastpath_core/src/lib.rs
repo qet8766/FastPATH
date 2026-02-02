@@ -1,7 +1,7 @@
 //! FastPATH Core - High-performance tile scheduler for WSI viewing.
 //!
 //! This Rust extension provides:
-//! - Concurrent, lock-free tile cache using DashMap
+//! - Concurrent tile cache using moka (TinyLFU eviction)
 //! - Parallel I/O with rayon thread pool
 //! - Viewport-based prefetching with velocity prediction
 //! - Fast JPEG decoding
@@ -205,19 +205,6 @@ impl RustTileScheduler {
     ///     Tuple of (downsample, cols, rows) or None if level doesn't exist
     fn get_level_info(&self, level: u32) -> Option<(u32, u32, u32)> {
         self.inner.get_level_info(level)
-    }
-
-    /// Check if a tile is in the cache without loading it.
-    ///
-    /// Args:
-    ///     level: Pyramid level
-    ///     col: Column index
-    ///     row: Row index
-    ///
-    /// Returns:
-    ///     True if the tile is cached, False otherwise
-    fn is_tile_cached(&self, level: u32, col: u32, row: u32) -> bool {
-        self.inner.is_tile_cached(level, col, row)
     }
 
     /// Filter a list of tiles to only those that are cached.

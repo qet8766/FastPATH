@@ -12,8 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py311"] }
 rayon = "1.10"
-crossbeam-channel = "0.5"
-dashmap = "6.1"
+moka = { version = "0.12", features = ["sync"] }
 zune-jpeg = "0.4"
 thiserror = "2.0"
 parking_lot = "0.12"
