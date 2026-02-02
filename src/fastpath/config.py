@@ -95,6 +95,9 @@ TARGET_MPP: float = 0.5
 #: JPEG quality for preprocessed tiles
 JPEG_QUALITY: int = 80
 
+#: Background color for pyramid tiles (white)
+BACKGROUND_COLOR: tuple[int, int, int] = (255, 255, 255)
+
 #: Supported WSI file extensions
 WSI_EXTENSIONS: frozenset[str] = frozenset({
     ".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".vms", ".vmu", ".scn"

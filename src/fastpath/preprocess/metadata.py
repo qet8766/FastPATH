@@ -13,6 +13,19 @@ from fastpath.core.types import LevelInfo
 logger = logging.getLogger(__name__)
 
 
+def pyramid_dir_for_slide(slide_path: Path, output_dir: Path) -> Path:
+    """Construct the .fastpath directory path for a slide.
+
+    Args:
+        slide_path: Path to the source WSI file
+        output_dir: Parent directory for the .fastpath folder
+
+    Returns:
+        Path like ``output_dir / "slide_name.fastpath"``
+    """
+    return output_dir / (slide_path.stem + ".fastpath")
+
+
 class PyramidStatus(Enum):
     """Status of an existing pyramid directory."""
 

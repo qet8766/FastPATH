@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastpath.config import (
+    BACKGROUND_COLOR,
     JPEG_QUALITY,
     TARGET_MPP,
     THUMBNAIL_JPEG_QUALITY,
@@ -17,7 +18,7 @@ from fastpath.config import (
 )
 from fastpath.core.types import LevelInfo
 
-from .metadata import PyramidMetadata, PyramidStatus, check_pyramid_status
+from .metadata import PyramidMetadata, PyramidStatus, check_pyramid_status, pyramid_dir_for_slide
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,19 @@ def is_vips_dzsave_available() -> bool:
     return _HAS_VIPS_OPENSLIDE
 
 
+def require_vips_openslide() -> None:
+    """Raise RuntimeError if pyvips with OpenSlide support is not available.
+
+    Raises:
+        RuntimeError: If pyvips or OpenSlide support is missing
+    """
+    if not _HAS_VIPS_OPENSLIDE:
+        raise RuntimeError(
+            "VipsPyramidBuilder requires pyvips with OpenSlide support. "
+            "Install libvips with OpenSlide enabled."
+        )
+
+
 class VipsPyramidBuilder:
     """Fast pyramid builder using pyvips dzsave().
 
@@ -68,11 +82,7 @@ class VipsPyramidBuilder:
     """
 
     def __init__(self, tile_size: int = 512) -> None:
-        if not _HAS_VIPS_OPENSLIDE:
-            raise RuntimeError(
-                "VipsPyramidBuilder requires pyvips with OpenSlide support. "
-                "Install libvips with OpenSlide enabled."
-            )
+        require_vips_openslide()
         self.tile_size = tile_size
 
     def build(
@@ -95,35 +105,87 @@ class VipsPyramidBuilder:
         """
         slide_path = Path(slide_path)
         output_dir = Path(output_dir)
+
+        pyramid_dir = self._resolve_pyramid_dir(slide_path, output_dir)
+        if self._handle_existing_pyramid(pyramid_dir, slide_path.name, force):
+            return None
+        self._prepare_pyramid_dir(pyramid_dir)
+
+        image, base_mpp, actual_mpp, actual_mag, dimensions = self._load_and_resize(slide_path)
+
+        self._generate_thumbnail(image, pyramid_dir, progress_callback)
+        self._run_dzsave(image, pyramid_dir, progress_callback)
+        levels = self._calculate_levels_from_dzsave(pyramid_dir / "tiles_files")
+        self._write_metadata(
+            pyramid_dir, slide_path, base_mpp, actual_mpp, actual_mag, dimensions, levels
+        )
+
+        logger.info("Generated %d pyramid levels for %s", len(levels), slide_path.name)
+        return pyramid_dir
+
+    def _resolve_pyramid_dir(self, slide_path: Path, output_dir: Path) -> Path:
+        """Construct the .fastpath output path and ensure output_dir exists.
+
+        Args:
+            slide_path: Path to the source WSI file
+            output_dir: Parent directory for the .fastpath folder
+
+        Returns:
+            Path to the .fastpath directory (may not exist yet)
+        """
         output_dir.mkdir(parents=True, exist_ok=True)
+        return pyramid_dir_for_slide(slide_path, output_dir)
 
-        # Create output directory
-        pyramid_name = slide_path.stem + ".fastpath"
-        pyramid_dir = output_dir / pyramid_name
+    def _handle_existing_pyramid(
+        self, pyramid_dir: Path, slide_name: str, force: bool
+    ) -> bool:
+        """Check existing pyramid status and clean up if needed.
 
-        # Check existing pyramid status
+        Args:
+            pyramid_dir: Path to the .fastpath directory
+            slide_name: Name of the source slide (for logging)
+            force: If True, rebuild even if complete
+
+        Returns:
+            True if the build should be skipped (already complete and not forced)
+        """
         status = check_pyramid_status(pyramid_dir)
 
         if status == PyramidStatus.COMPLETE and not force:
-            logger.info("Skipping %s: already preprocessed (use --force to rebuild)", slide_path.name)
-            return None
+            logger.info("Skipping %s: already preprocessed (use --force to rebuild)", slide_name)
+            return True
 
         if status in (PyramidStatus.INCOMPLETE, PyramidStatus.CORRUPTED, PyramidStatus.COMPLETE):
             if status == PyramidStatus.INCOMPLETE:
-                logger.info("Found incomplete preprocessing for %s, cleaning up...", slide_path.name)
+                logger.info("Found incomplete preprocessing for %s, cleaning up...", slide_name)
             elif status == PyramidStatus.CORRUPTED:
-                logger.warning("Found corrupted preprocessing for %s, cleaning up...", slide_path.name)
+                logger.warning("Found corrupted preprocessing for %s, cleaning up...", slide_name)
             elif force:
-                logger.info("Force rebuild for %s, removing existing...", slide_path.name)
+                logger.info("Force rebuild for %s, removing existing...", slide_name)
             shutil.rmtree(pyramid_dir)
 
+        return False
+
+    def _prepare_pyramid_dir(self, pyramid_dir: Path) -> None:
+        """Create the pyramid directory and its subdirectories.
+
+        Args:
+            pyramid_dir: Path to the .fastpath directory to create
+        """
         pyramid_dir.mkdir()
+        (pyramid_dir / "annotations").mkdir()
 
-        # Create subdirectories
-        annotations_dir = pyramid_dir / "annotations"
-        annotations_dir.mkdir()
+    def _load_and_resize(
+        self, slide_path: Path
+    ) -> tuple[Any, float, float, float, tuple[int, int]]:
+        """Load slide at level 0 and resize to TARGET_MPP.
 
-        # Load level 0 (highest resolution) and resize to 0.5 MPP
+        Args:
+            slide_path: Path to the source WSI file
+
+        Returns:
+            Tuple of (image, base_mpp, actual_mpp, actual_magnification, dimensions)
+        """
         logger.info("Loading slide level 0 with pyvips...")
         image = pyvips.Image.openslideload(str(slide_path), level=0)
         base_mpp = self._get_base_mpp(slide_path)
@@ -145,10 +207,23 @@ class VipsPyramidBuilder:
             actual_mpp = base_mpp
 
         actual_mag = 10.0 / actual_mpp if actual_mpp > 0 else 10.0
-
         dimensions = (image.width, image.height)
 
-        # Generate thumbnail
+        return image, base_mpp, actual_mpp, actual_mag, dimensions
+
+    def _generate_thumbnail(
+        self,
+        image: Any,
+        pyramid_dir: Path,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Generate and save the slide thumbnail.
+
+        Args:
+            image: pyvips.Image of the slide
+            pyramid_dir: Path to the .fastpath directory
+            progress_callback: Optional progress callback
+        """
         if progress_callback:
             progress_callback("thumbnail", 0, 1)
         logger.info("Generating thumbnail...")
@@ -156,7 +231,19 @@ class VipsPyramidBuilder:
         thumb.jpegsave(str(pyramid_dir / "thumbnail.jpg"), Q=THUMBNAIL_JPEG_QUALITY)
         logger.debug("Thumbnail generated")
 
-        # Generate tile pyramid using dzsave - THE FAST PART
+    def _run_dzsave(
+        self,
+        image: Any,
+        pyramid_dir: Path,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Run dzsave to generate the tile pyramid.
+
+        Args:
+            image: pyvips.Image of the slide
+            pyramid_dir: Path to the .fastpath directory
+            progress_callback: Optional progress callback
+        """
         if progress_callback:
             progress_callback("dzsave", 0, 1)
         logger.info("Generating tile pyramid with dzsave...")
@@ -173,10 +260,27 @@ class VipsPyramidBuilder:
         )
         logger.debug("Tile pyramid generated")
 
-        # Read dzsave output to calculate level info
-        levels = self._calculate_levels_from_dzsave(pyramid_dir / "tiles_files")
+    def _write_metadata(
+        self,
+        pyramid_dir: Path,
+        slide_path: Path,
+        base_mpp: float,
+        actual_mpp: float,
+        actual_mag: float,
+        dimensions: tuple[int, int],
+        levels: list[LevelInfo],
+    ) -> None:
+        """Write metadata.json and default.geojson to the pyramid directory.
 
-        # Write metadata
+        Args:
+            pyramid_dir: Path to the .fastpath directory
+            slide_path: Path to the source WSI file
+            base_mpp: Original microns-per-pixel
+            actual_mpp: Actual MPP after resize
+            actual_mag: Actual magnification after resize
+            dimensions: (width, height) of the resized image
+            levels: List of LevelInfo from dzsave output
+        """
         metadata = PyramidMetadata(
             version="1.0",
             source_file=slide_path.name,
@@ -186,7 +290,7 @@ class VipsPyramidBuilder:
             tile_size=self.tile_size,
             dimensions=dimensions,
             levels=levels,
-            background_color=(255, 255, 255),  # White background default
+            background_color=BACKGROUND_COLOR,
             preprocessed_at=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -194,13 +298,11 @@ class VipsPyramidBuilder:
             json.dump(metadata.to_dict(), f, indent=2)
 
         # Create empty default annotation file
+        annotations_dir = pyramid_dir / "annotations"
         with open(annotations_dir / "default.geojson", "w") as f:
             json.dump(
                 {"type": "FeatureCollection", "features": []}, f, indent=2
             )
-
-        logger.info("Generated %d pyramid levels for %s", len(levels), slide_path.name)
-        return pyramid_dir
 
     def _get_base_mpp(self, slide_path: Path) -> float:
         """Get microns-per-pixel at level 0 from slide metadata.
@@ -214,7 +316,7 @@ class VipsPyramidBuilder:
             for field in ("openslide.mpp-x", "aperio.MPP"):
                 try:
                     value = image.get(field)
-                    if value:
+                    if value and float(value) > 0:
                         return float(value)
                 except (ValueError, TypeError, KeyError, pyvips.error.Error):
                     continue

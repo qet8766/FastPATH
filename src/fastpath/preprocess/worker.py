@@ -6,9 +6,12 @@ which requires worker functions to be importable (not defined in __main__).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from .pyramid import VipsPyramidBuilder
+
+logger = logging.getLogger(__name__)
 
 
 def process_single_slide(
@@ -33,6 +36,7 @@ def process_single_slide(
         - error_message: Error string if failed, None otherwise
         - was_skipped: True if slide was skipped (already complete)
     """
+    logger.info("Processing %s", slide_path.name)
     try:
         builder = VipsPyramidBuilder(tile_size=tile_size)
         result = builder.build(slide_path, output_dir, force=force)
@@ -41,4 +45,5 @@ def process_single_slide(
             return None, None, True
         return result, None, False
     except Exception as e:
+        logger.error("Failed to process %s: %s", slide_path.name, e)
         return None, str(e), False

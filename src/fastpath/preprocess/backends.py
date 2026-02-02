@@ -55,6 +55,21 @@ def get_vips_import_error() -> str | None:
     return _vips_import_error
 
 
+def require_vips() -> None:
+    """Raise RuntimeError if PyVIPS is not available.
+
+    Raises:
+        RuntimeError: If pyvips failed to import, with install instructions
+    """
+    if not _HAS_VIPS:
+        raise RuntimeError(
+            f"PyVIPS is required but not available: {_vips_import_error}\n"
+            "Install pyvips and libvips: pip install pyvips\n"
+            "On Windows, also install libvips DLLs from: "
+            "https://github.com/libvips/build-win64-mxe/releases"
+        )
+
+
 class VIPSBackend:
     """PyVIPS-based image processing backend.
 
@@ -78,8 +93,7 @@ class VIPSBackend:
         Returns:
             pyvips.Image in RGB format
         """
-        if not _HAS_VIPS:
-            raise RuntimeError(f"PyVIPS is not available: {_vips_import_error}")
+        require_vips()
 
         height, width = arr.shape[:2]
         bands = arr.shape[2] if arr.ndim == 3 else 1
@@ -131,8 +145,7 @@ class VIPSBackend:
         Returns:
             pyvips.Image
         """
-        if not _HAS_VIPS:
-            raise RuntimeError(f"PyVIPS is not available: {_vips_import_error}")
+        require_vips()
 
         # Sequential access is faster for one-pass operations
         return pyvips.Image.new_from_file(str(path), access="sequential")
@@ -192,8 +205,7 @@ class VIPSBackend:
         Returns:
             Combined pyvips.Image of size (tile_size*2, tile_size*2)
         """
-        if not _HAS_VIPS:
-            raise RuntimeError(f"PyVIPS is not available: {_vips_import_error}")
+        require_vips()
 
         # Create background tile for missing tiles
         bg_tile = (
@@ -233,8 +245,7 @@ class VIPSBackend:
         Returns:
             pyvips.Image filled with the color
         """
-        if not _HAS_VIPS:
-            raise RuntimeError(f"PyVIPS is not available: {_vips_import_error}")
+        require_vips()
 
         return (
             pyvips.Image.black(width, height, bands=3)
@@ -252,13 +263,7 @@ def get_backend() -> type[VIPSBackend]:
     Raises:
         RuntimeError: If PyVIPS is not available
     """
-    if not _HAS_VIPS:
-        raise RuntimeError(
-            f"PyVIPS is required but not available: {_vips_import_error}\n"
-            "Install pyvips and libvips: pip install pyvips\n"
-            "On Windows, also install libvips DLLs from: "
-            "https://github.com/libvips/build-win64-mxe/releases"
-        )
+    require_vips()
     return VIPSBackend
 
 
@@ -284,8 +289,7 @@ def set_vips_concurrency(num_threads: int) -> None:
     Raises:
         RuntimeError: If PyVIPS is not available
     """
-    if not _HAS_VIPS:
-        raise RuntimeError("PyVIPS is not available")
+    require_vips()
 
     # cache_set_max sets max number of operations to cache (not memory size)
     pyvips.cache_set_max(1000)
