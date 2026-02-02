@@ -10,37 +10,30 @@ The codebase has two independent workloads that share only data classes and a py
 
 ```
 src/fastpath/
-├── config.py          # Shared constants (both sides), env var overrides
+├── config.py          # Shared constants, env var overrides
 ├── core/
-│   ├── types.py       # TileCoord (NamedTuple), LevelInfo (dataclass) — no logic
-│   ├── slide.py       # VIEWER: SlideManager (metadata, viewport, getLevelForScale)
-│   ├── annotations.py # VIEWER: AnnotationManager (spatial indexing)
-│   └── project.py     # VIEWER: ProjectManager
-├── preprocess/        # PREPROCESSING ONLY (standalone CLI)
+│   ├── types.py       # TileCoord, LevelInfo — shared data classes (no logic)
+│   ├── slide.py       # SlideManager (metadata, viewport, level selection)
+│   └── annotations.py # AnnotationManager (spatial indexing, GeoJSON)
+├── preprocess/        # PREPROCESSING ONLY — standalone CLI
 │   ├── pyramid.py     # VipsPyramidBuilder (pyvips dzsave)
-│   ├── metadata.py    # PyramidMetadata dataclass, PyramidStatus enum, validation
-│   ├── worker.py      # Batch worker (separate module for Windows multiprocessing compat)
-│   ├── backends.py    # pyvips wrapper (also used by core/slide.py, ai/manager.py)
-│   └── __main__.py    # CLI entry point
+│   ├── metadata.py    # PyramidMetadata, PyramidStatus, validation
+│   ├── worker.py      # Batch worker (separate module for Windows mp compat)
+│   └── backends.py    # pyvips wrapper (also used by viewer + AI)
 ├── ui/                # VIEWER ONLY
-│   ├── app.py         # AppController (main entry, coordinates everything)
+│   ├── app.py         # AppController — main entry, coordinates everything
 │   ├── providers.py   # TileImageProvider (QML → Rust bridge)
 │   ├── models.py      # TileModel, RecentFilesModel, FileListModel
-│   ├── navigator.py   # SlideNavigator
-│   ├── preprocess.py  # PreprocessController (in-app preprocessing UI)
-│   ├── settings.py    # Settings (QSettings wrapper)
-│   └── qml/           # QML components (SlideViewer, TileLayer, Theme, etc.)
+│   └── qml/           # QML components (SlideViewer, TileLayer, Theme)
 └── ai/                # VIEWER ONLY
-    ├── base.py        # AIPlugin ABC — inherit for custom plugins
-    └── manager.py     # AIPluginManager (discovery, loading, PluginWorker thread)
+    ├── base.py        # AIPlugin ABC
+    └── manager.py     # AIPluginManager (discovery, loading, worker thread)
 
-src/fastpath_core/     # Rust extension (VIEWER ONLY) — PyO3/maturin
-└── src/
-    ├── scheduler.rs   # RustTileScheduler (caching, prefetching)
-    ├── cache.rs       # moka tile cache (TinyLFU eviction)
-    ├── prefetch.rs    # Viewport-based prefetching, rayon thread pool
-    ├── decoder.rs     # zune-jpeg SIMD-accelerated JPEG decoding
-    ├── format.rs, error.rs, lib.rs
+fastpath_core/ (Rust, PyO3/maturin — VIEWER ONLY)
+├── scheduler.rs       # RustTileScheduler (orchestrates cache + prefetch)
+├── cache.rs           # moka tile cache (TinyLFU eviction)
+├── prefetch.rs        # Viewport-based prefetching, rayon thread pool
+└── decoder.rs         # zune-jpeg SIMD JPEG decoding
 ```
 
 ### Cross-dependency summary

@@ -108,15 +108,15 @@ Item {
                 y: 4
                 width: labelText.width + 8
                 height: labelText.height + 4
-                color: Qt.rgba(0, 0, 0, 0.7)
-                radius: 2
+                color: Theme.overlayBackground
+                radius: Theme.radiusSmall
 
                 Text {
                     id: labelText
                     anchors.centerIn: parent
                     text: annotation.label
-                    color: "white"
-                    font.pixelSize: 11
+                    color: Theme.textBright
+                    font.pixelSize: Theme.fontSizeSmall
                 }
             }
 

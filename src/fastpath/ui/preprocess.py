@@ -34,13 +34,25 @@ def _normalize_file_url(path: str) -> str:
 
 
 def _map_stage_to_progress(stage: str, current: int, total: int) -> float:
-    """Map preprocessing stage name to a progress value (0.0-1.0)."""
+    """Map preprocessing stage name to a progress value (0.0-1.0).
+
+    Thumbnail extraction and load/resize are near-instant (embedded image
+    or shrink-on-load), so they get a tiny slice. dzsave_progress covers
+    94% of the bar since tile generation dominates wall-clock time.
+    """
     if stage == "thumbnail":
-        return 0.1
+        return 0.01
+    elif stage == "load":
+        return 0.02
+    elif stage == "resize":
+        return 0.03
     elif stage == "dzsave":
-        return 0.8
+        return 0.04
+    elif stage == "dzsave_progress":
+        # Map 0-100% dzsave progress to 0.04-0.98 overall range
+        return 0.04 + 0.94 * (current / max(total, 1))
     elif stage.startswith("level_"):
-        return 0.8 + 0.15 * (current / max(total, 1))
+        return 0.98 + 0.02 * (current / max(total, 1))
     return 0.5
 
 
@@ -87,16 +99,25 @@ class PreprocessWorker(QThread):
                     "Please install libvips with OpenSlide enabled."
                 )
 
-            self.progressChanged.emit(0.05, "Initializing pyvips dzsave...")
             builder = VipsPyramidBuilder(tile_size=self.tile_size)
+
+            _stage_labels = {
+                "load": "Loading slide...",
+                "resize": "Resizing to target resolution...",
+                "thumbnail": "Generating thumbnail...",
+                "dzsave": "Starting tile generation...",
+            }
 
             def progress_callback(stage: str, current: int, total: int) -> None:
                 if self._cancelled:
                     raise InterruptedError("Preprocessing cancelled")
                 progress = _map_stage_to_progress(stage, current, total)
-                self.progressChanged.emit(progress, f"{stage}: {current}/{total}")
+                if stage == "dzsave_progress":
+                    status = f"Generating tiles: {current}%"
+                else:
+                    status = _stage_labels.get(stage, f"{stage}: {current}/{total}")
+                self.progressChanged.emit(progress, status)
 
-            self.progressChanged.emit(0.1, "Processing slide...")
             result = builder.build(
                 self.input_path,
                 self.output_dir,

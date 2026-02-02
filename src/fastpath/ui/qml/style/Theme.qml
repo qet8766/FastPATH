@@ -25,6 +25,15 @@ QtObject {
     readonly property color warning: "#ff8c00"
     readonly property color success: "#4ec9b0"
 
+    // Status color variants
+    readonly property color errorBackground: Qt.rgba(error.r, error.g, error.b, 0.24)
+    readonly property color dangerHover: "#d32f2f"
+
+    // Button sizes
+    readonly property int buttonHeightSmall: 28
+    readonly property int buttonHeightNormal: 36
+    readonly property int buttonHeightLarge: 40
+
     // Annotation colors
     readonly property var annotationColors: [
         "#ff6b6b",  // Red
@@ -61,6 +70,9 @@ QtObject {
     readonly property int animationFast: 100
     readonly property int animationNormal: 200
     readonly property int animationSlow: 300
+
+    // Overlay
+    readonly property color overlayBackground: Qt.rgba(0, 0, 0, 0.7)
 
     // Viewer
     readonly property color viewerBackground: "#2a2a2a"

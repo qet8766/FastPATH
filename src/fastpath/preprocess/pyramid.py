@@ -111,9 +111,11 @@ class VipsPyramidBuilder:
             return None
         self._prepare_pyramid_dir(pyramid_dir)
 
-        image, base_mpp, actual_mpp, actual_mag, dimensions = self._load_and_resize(slide_path)
+        self._generate_thumbnail(slide_path, pyramid_dir, progress_callback)
 
-        self._generate_thumbnail(image, pyramid_dir, progress_callback)
+        image, base_mpp, actual_mpp, actual_mag, dimensions = self._load_and_resize(
+            slide_path, progress_callback
+        )
         self._run_dzsave(image, pyramid_dir, progress_callback)
         levels = self._calculate_levels_from_dzsave(pyramid_dir / "tiles_files")
         self._write_metadata(
@@ -176,22 +178,29 @@ class VipsPyramidBuilder:
         (pyramid_dir / "annotations").mkdir()
 
     def _load_and_resize(
-        self, slide_path: Path
+        self,
+        slide_path: Path,
+        progress_callback: Callable[[str, int, int], None] | None = None,
     ) -> tuple[Any, float, float, float, tuple[int, int]]:
         """Load slide at level 0 and resize to TARGET_MPP.
 
         Args:
             slide_path: Path to the source WSI file
+            progress_callback: Optional callback(stage, current, total)
 
         Returns:
             Tuple of (image, base_mpp, actual_mpp, actual_magnification, dimensions)
         """
+        if progress_callback:
+            progress_callback("load", 0, 1)
         logger.info("Loading slide level 0 with pyvips...")
         image = pyvips.Image.openslideload(str(slide_path), level=0)
-        base_mpp = self._get_base_mpp(slide_path)
+        base_mpp = self._get_base_mpp(image, slide_path.name)
         logger.info("Loaded %s: %d x %d px (MPP %.4f)", slide_path.name, image.width, image.height, base_mpp)
 
         if base_mpp < TARGET_MPP:
+            if progress_callback:
+                progress_callback("resize", 0, 1)
             resize_factor = base_mpp / TARGET_MPP
             logger.info("Resizing by %.3f for %.1f MPP...", resize_factor, TARGET_MPP)
             image = image.resize(resize_factor, vscale=resize_factor, kernel="lanczos3")
@@ -213,21 +222,44 @@ class VipsPyramidBuilder:
 
     def _generate_thumbnail(
         self,
-        image: Any,
+        slide_path: Path,
         pyramid_dir: Path,
         progress_callback: Callable[[str, int, int], None] | None,
     ) -> None:
         """Generate and save the slide thumbnail.
 
+        Tries to extract an embedded thumbnail/macro image from the WSI
+        (instant, no pixel processing). Falls back to shrink-on-load from
+        the file, which reads at an appropriate lower resolution level.
+
         Args:
-            image: pyvips.Image of the slide
+            slide_path: Path to the source WSI file
             pyramid_dir: Path to the .fastpath directory
             progress_callback: Optional progress callback
         """
         if progress_callback:
             progress_callback("thumbnail", 0, 1)
         logger.info("Generating thumbnail...")
-        thumb = image.thumbnail_image(THUMBNAIL_MAX_SIZE)
+
+        thumb = None
+        # Try extracting embedded thumbnail/macro from the WSI (no pipeline eval)
+        for associated in ("thumbnail", "macro"):
+            try:
+                thumb = pyvips.Image.openslideload(str(slide_path), associated=associated)
+                if max(thumb.width, thumb.height) > THUMBNAIL_MAX_SIZE:
+                    thumb = thumb.thumbnail_image(THUMBNAIL_MAX_SIZE)
+                break
+            except pyvips.error.Error:
+                continue
+
+        # Fallback: shrink-on-load from file (reads at appropriate resolution level)
+        if thumb is None:
+            thumb = pyvips.Image.thumbnail(str(slide_path), THUMBNAIL_MAX_SIZE)
+
+        # Flatten alpha channel (some associated images have 4 bands)
+        if thumb.bands == 4:
+            thumb = thumb.flatten()
+
         thumb.jpegsave(str(pyramid_dir / "thumbnail.jpg"), Q=THUMBNAIL_JPEG_QUALITY)
         logger.debug("Thumbnail generated")
 
@@ -247,6 +279,27 @@ class VipsPyramidBuilder:
         if progress_callback:
             progress_callback("dzsave", 0, 1)
         logger.info("Generating tile pyramid with dzsave...")
+
+        # Enable vips progress signals for smooth per-tile updates
+        if progress_callback:
+            last_percent = -1
+            cancelled = False
+
+            def _on_eval(_image: Any, progress: Any) -> None:
+                nonlocal last_percent, cancelled
+                if cancelled:
+                    return
+                percent = progress.percent
+                if percent != last_percent:
+                    last_percent = percent
+                    try:
+                        progress_callback("dzsave_progress", percent, 100)
+                    except InterruptedError:
+                        cancelled = True
+                        raise
+
+            image.set_progress(True)
+            image.signal_connect("eval", _on_eval)
 
         # dzsave with layout="dz" creates: pyramid_dir/tiles_files/N/col_row.jpeg
         image.dzsave(
@@ -304,30 +357,27 @@ class VipsPyramidBuilder:
                 {"type": "FeatureCollection", "features": []}, f, indent=2
             )
 
-    def _get_base_mpp(self, slide_path: Path) -> float:
-        """Get microns-per-pixel at level 0 from slide metadata.
+    def _get_base_mpp(self, image: Any, slide_name: str) -> float:
+        """Get microns-per-pixel at level 0 from already-loaded image metadata.
+
+        Args:
+            image: pyvips.Image already opened with openslideload
+            slide_name: Slide filename for log messages
 
         Returns:
             Base MPP value, or 0.25 as fallback (assumes 40x).
         """
-        try:
-            image = pyvips.Image.openslideload(str(slide_path), level=0)
+        for field in ("openslide.mpp-x", "aperio.MPP"):
+            try:
+                value = image.get(field)
+                if value and float(value) > 0:
+                    return float(value)
+            except (ValueError, TypeError, KeyError, pyvips.error.Error):
+                continue
 
-            for field in ("openslide.mpp-x", "aperio.MPP"):
-                try:
-                    value = image.get(field)
-                    if value and float(value) > 0:
-                        return float(value)
-                except (ValueError, TypeError, KeyError, pyvips.error.Error):
-                    continue
-
-            # No MPP metadata — assume 40x (0.25 MPP)
-            logger.warning("No MPP metadata in %s, assuming 40x (0.25 MPP)", slide_path.name)
-            return 0.25
-
-        except (OSError, pyvips.error.Error):
-            logger.warning("Cannot read MPP from %s, assuming 40x (0.25 MPP)", slide_path.name)
-            return 0.25
+        # No MPP metadata — assume 40x (0.25 MPP)
+        logger.warning("No MPP metadata in %s, assuming 40x (0.25 MPP)", slide_name)
+        return 0.25
 
     def _calculate_levels_from_dzsave(self, dzsave_dir: Path) -> list[LevelInfo]:
         """Calculate level info from dzsave output.

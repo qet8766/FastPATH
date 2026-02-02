@@ -125,20 +125,11 @@ Rectangle {
             font.pixelSize: Theme.fontSizeSmall
         }
 
-        TextField {
-            id: labelField
+        ThemedTextField {
             Layout.fillWidth: true
             placeholderText: "Enter label..."
             text: root.currentLabel
             onTextChanged: root.currentLabel = text
-
-            background: Rectangle {
-                color: Theme.backgroundLight
-                radius: Theme.radiusSmall
-                border.color: labelField.focus ? Theme.borderFocus : Theme.border
-            }
-
-            color: Theme.text
             font.pixelSize: Theme.fontSizeSmall
         }
 

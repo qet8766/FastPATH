@@ -204,44 +204,20 @@ ApplicationWindow {
                         Layout.alignment: Qt.AlignHCenter
                         spacing: Theme.spacingNormal
 
-                        Button {
+                        ThemedButton {
                             text: "Open Slide..."
+                            variant: "primary"
+                            buttonSize: "large"
+                            implicitWidth: 150
                             onClicked: fileDialog.open()
-
-                            background: Rectangle {
-                                color: parent.hovered ? Theme.primaryHover : Theme.primary
-                                radius: Theme.radiusNormal
-                                implicitWidth: 150
-                                implicitHeight: 40
-                            }
-
-                            contentItem: Text {
-                                text: parent.text
-                                color: Theme.textBright
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
                         }
 
-                        Button {
+                        ThemedButton {
                             text: "Preprocess WSI..."
+                            variant: "outline"
+                            buttonSize: "large"
+                            implicitWidth: 150
                             onClicked: preprocessMode = true
-
-                            background: Rectangle {
-                                color: parent.hovered ? Theme.surfaceHover : Theme.surface
-                                radius: Theme.radiusNormal
-                                border.color: Theme.primary
-                                border.width: 2
-                                implicitWidth: 150
-                                implicitHeight: 40
-                            }
-
-                            contentItem: Text {
-                                text: parent.text
-                                color: Theme.primary
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
                         }
                     }
                 }
@@ -282,24 +258,9 @@ ApplicationWindow {
                 spacing: Theme.spacingNormal
 
                 // Slide info
-                GroupBox {
+                ThemedGroupBox {
                     Layout.fillWidth: true
                     title: "Slide Info"
-
-                    background: Rectangle {
-                        color: Theme.surface
-                        radius: Theme.radiusNormal
-                        border.color: Theme.border
-                        y: parent.topPadding - parent.padding
-                        height: parent.height - parent.topPadding + parent.padding
-                    }
-
-                    label: Label {
-                        text: parent.title
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                        padding: Theme.spacingSmall
-                    }
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -340,25 +301,10 @@ ApplicationWindow {
                 }
 
                 // Thumbnail / minimap
-                GroupBox {
+                ThemedGroupBox {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 200
                     title: "Overview"
-
-                    background: Rectangle {
-                        color: Theme.surface
-                        radius: Theme.radiusNormal
-                        border.color: Theme.border
-                        y: parent.topPadding - parent.padding
-                        height: parent.height - parent.topPadding + parent.padding
-                    }
-
-                    label: Label {
-                        text: parent.title
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                        padding: Theme.spacingSmall
-                    }
 
                     Image {
                         anchors.fill: parent
@@ -390,24 +336,9 @@ ApplicationWindow {
                 }
 
                 // View controls
-                GroupBox {
+                ThemedGroupBox {
                     Layout.fillWidth: true
                     title: "View"
-
-                    background: Rectangle {
-                        color: Theme.surface
-                        radius: Theme.radiusNormal
-                        border.color: Theme.border
-                        y: parent.topPadding - parent.padding
-                        height: parent.height - parent.topPadding + parent.padding
-                    }
-
-                    label: Label {
-                        text: parent.title
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                        padding: Theme.spacingSmall
-                    }
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -431,69 +362,28 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: Theme.spacingSmall
 
-                            Button {
+                            ThemedButton {
                                 text: "Fit"
+                                buttonSize: "small"
                                 Layout.fillWidth: true
                                 onClicked: viewer.fitToWindow()
-                                implicitHeight: 28
-
-                                background: Rectangle {
-                                    color: parent.hovered ? Theme.surfaceHover : Theme.surface
-                                    radius: Theme.radiusSmall
-                                    border.color: Theme.border
-                                }
-                                contentItem: Text {
-                                    text: parent.text
-                                    color: Theme.text
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
                             }
 
-                            Button {
+                            ThemedButton {
                                 text: "1:1"
+                                buttonSize: "small"
                                 Layout.fillWidth: true
                                 onClicked: viewer.resetView()
-                                implicitHeight: 28
-
-                                background: Rectangle {
-                                    color: parent.hovered ? Theme.surfaceHover : Theme.surface
-                                    radius: Theme.radiusSmall
-                                    border.color: Theme.border
-                                }
-                                contentItem: Text {
-                                    text: parent.text
-                                    color: Theme.text
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
                             }
                         }
                     }
                 }
 
                 // Navigation (only shown with multiple slides)
-                GroupBox {
+                ThemedGroupBox {
                     Layout.fillWidth: true
                     title: "Navigation"
                     visible: Navigator.hasMultipleSlides
-
-                    background: Rectangle {
-                        color: Theme.surface
-                        radius: Theme.radiusNormal
-                        border.color: Theme.border
-                        y: parent.topPadding - parent.padding
-                        height: parent.height - parent.topPadding + parent.padding
-                    }
-
-                    label: Label {
-                        text: parent.title
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                        padding: Theme.spacingSmall
-                    }
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -510,46 +400,20 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: Theme.spacingSmall
 
-                            Button {
+                            ThemedButton {
                                 text: "< Prev"
+                                buttonSize: "small"
                                 Layout.fillWidth: true
                                 enabled: Navigator.currentIndex > 0
                                 onClicked: App.openPreviousSlide()
-                                implicitHeight: 28
-
-                                background: Rectangle {
-                                    color: parent.enabled ? (parent.hovered ? Theme.surfaceHover : Theme.surface) : Theme.backgroundDark
-                                    radius: Theme.radiusSmall
-                                    border.color: Theme.border
-                                }
-                                contentItem: Text {
-                                    text: parent.text
-                                    color: parent.enabled ? Theme.text : Theme.textMuted
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
                             }
 
-                            Button {
+                            ThemedButton {
                                 text: "Next >"
+                                buttonSize: "small"
                                 Layout.fillWidth: true
                                 enabled: Navigator.currentIndex < Navigator.totalSlides - 1
                                 onClicked: App.openNextSlide()
-                                implicitHeight: 28
-
-                                background: Rectangle {
-                                    color: parent.enabled ? (parent.hovered ? Theme.surfaceHover : Theme.surface) : Theme.backgroundDark
-                                    radius: Theme.radiusSmall
-                                    border.color: Theme.border
-                                }
-                                contentItem: Text {
-                                    text: parent.text
-                                    color: parent.enabled ? Theme.text : Theme.textMuted
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
                             }
                         }
                     }

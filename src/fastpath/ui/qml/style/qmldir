@@ -1,2 +1,7 @@
 module style
 singleton Theme 1.0 Theme.qml
+ThemedButton 1.0 ThemedButton.qml
+ThemedComboBox 1.0 ThemedComboBox.qml
+ThemedGroupBox 1.0 ThemedGroupBox.qml
+ThemedTextField 1.0 ThemedTextField.qml
+ThemedProgressBar 1.0 ThemedProgressBar.qml

@@ -74,7 +74,7 @@ Rectangle {
                     Label {
                         text: modelData.description
                         color: Theme.textMuted
-                        font.pixelSize: 10
+                        font.pixelSize: Theme.fontSizeSmall
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
@@ -170,25 +170,11 @@ Rectangle {
             }
         }
 
-        Button {
+        ThemedButton {
             text: "Select Region"
+            buttonSize: "small"
             Layout.fillWidth: true
             onClicked: root.regionSelectionRequested()
-
-            background: Rectangle {
-                color: parent.hovered ? Theme.surfaceHover : Theme.surface
-                radius: Theme.radiusSmall
-                border.color: Theme.border
-                implicitHeight: 28
-            }
-
-            contentItem: Text {
-                text: parent.text
-                color: Theme.text
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                font.pixelSize: Theme.fontSizeSmall
-            }
         }
 
         Rectangle {
@@ -198,28 +184,13 @@ Rectangle {
         }
 
         // Run button
-        Button {
+        ThemedButton {
             text: root.isProcessing ? "Processing..." : "Run Analysis"
+            variant: "primary"
             Layout.fillWidth: true
             enabled: !root.isProcessing &&
                      root.selectedRegion !== null &&
                      pluginList.currentIndex >= 0
-
-            background: Rectangle {
-                color: parent.enabled ?
-                       (parent.hovered ? Theme.primaryHover : Theme.primary) :
-                       Theme.backgroundDark
-                radius: Theme.radiusSmall
-                implicitHeight: 36
-            }
-
-            contentItem: Text {
-                text: parent.text
-                color: parent.enabled ? Theme.textBright : Theme.textMuted
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                font.pixelSize: Theme.fontSizeNormal
-            }
 
             onClicked: {
                 if (pluginList.currentIndex >= 0) {

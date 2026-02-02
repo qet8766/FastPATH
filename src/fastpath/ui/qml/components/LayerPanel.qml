@@ -198,28 +198,11 @@ Rectangle {
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
-            Button {
+            ThemedButton {
                 text: "Clear All"
+                buttonSize: "small"
                 enabled: root.annotations.length > 0
                 Layout.fillWidth: true
-
-                background: Rectangle {
-                    color: parent.enabled ?
-                           (parent.hovered ? Theme.surfaceHover : Theme.surface) :
-                           Theme.backgroundDark
-                    radius: Theme.radiusSmall
-                    border.color: Theme.border
-                    implicitHeight: 28
-                }
-
-                contentItem: Text {
-                    text: parent.text
-                    color: parent.enabled ? Theme.text : Theme.textMuted
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-
                 onClicked: clearConfirmDialog.open()
             }
         }
