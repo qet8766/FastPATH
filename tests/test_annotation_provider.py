@@ -7,19 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication
 
 from fastpath.core.annotations import AnnotationManager
 from fastpath.ui.providers import AnnotationTileImageProvider
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Create a Qt application for testing."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    yield app
 
 
 @pytest.fixture

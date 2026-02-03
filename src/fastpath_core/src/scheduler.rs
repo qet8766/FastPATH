@@ -101,6 +101,17 @@ impl TileScheduler {
         }
     }
 
+    /// Invalidate in-flight prefetch work and clear L1 cache.
+    ///
+    /// Bumps the generation counter first so prefetch workers see the change
+    /// before the cache is cleared, preventing stale tiles from being inserted
+    /// into the fresh cache. L2 is NOT touched — it persists across slides.
+    fn invalidate_current(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        self.in_flight.lock().clear();
+        self.cache.clear();
+    }
+
     /// Load a .fastpath directory.
     pub fn load(&self, path: &str) -> TileResult<()> {
         let path_buf = PathBuf::from(path);
@@ -119,13 +130,7 @@ impl TileScheduler {
 
         let entry = self.pool.load_or_get(slide_id, &path_buf)?;
 
-        // Invalidate in-flight prefetch work before clearing cache.
-        // Bump generation first so workers see the change before the cache is cleared,
-        // preventing stale tiles from being inserted into the fresh cache.
-        self.generation.fetch_add(1, Ordering::Release);
-        self.in_flight.lock().clear();
-        self.cache.clear();
-        // L2 is NOT cleared — persists across slide switches
+        self.invalidate_current();
 
         let mut slide = self.slide.write();
         *slide = Some(entry);
@@ -136,12 +141,9 @@ impl TileScheduler {
 
     /// Close the current slide.
     pub fn close(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
-        self.in_flight.lock().clear();
+        self.invalidate_current();
         let mut slide = self.slide.write();
         *slide = None;
-        self.cache.clear();
-        // L2 is NOT cleared — persists across slide switches
         self.active_slide_id.store(0, Ordering::Release);
     }
 
@@ -177,6 +179,11 @@ impl TileScheduler {
             .unwrap_or((0, 0))
     }
 
+    /// Log a tile error to stderr.
+    fn log_tile_error(phase: &str, coord: &TileCoord, path: &std::path::Path, error: &dyn std::fmt::Debug) {
+        eprintln!("[TILE ERROR] {phase}{coord}; path={path:?}: {error:?}");
+    }
+
     /// Read, compress-cache (L2), decode, and insert a tile into L1.
     ///
     /// Called only from foreground `get_tile()` — does NOT use in-flight dedup.
@@ -193,10 +200,7 @@ impl TileScheduler {
         let compressed = match read_jpeg_bytes(path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
-                    coord.level, coord.col, coord.row, path, e
-                );
+                Self::log_tile_error("", coord, path, &e);
                 return None;
             }
         };
@@ -218,8 +222,7 @@ impl TileScheduler {
                 if let Some(t) = t0 {
                     let total = t.elapsed();
                     eprintln!(
-                        "[TILE TIMING] {}/{}_{}  disk={:.2?} l2={:.2?} decode={:.2?} total={:.2?}",
-                        coord.level, coord.col, coord.row,
+                        "[TILE TIMING] {coord}  disk={:.2?} l2={:.2?} decode={:.2?} total={:.2?}",
                         t_read.unwrap(),
                         t_l2.unwrap() - t_read.unwrap(),
                         t_decode.unwrap() - t_l2.unwrap(),
@@ -229,10 +232,7 @@ impl TileScheduler {
                 Some(tile)
             }
             Err(e) => {
-                eprintln!(
-                    "[TILE ERROR] decode {}/{}_{}; path={:?}: {:?}",
-                    coord.level, coord.col, coord.row, path, e
-                );
+                Self::log_tile_error("decode ", coord, path, &e);
                 None
             }
         }
@@ -305,10 +305,7 @@ impl TileScheduler {
         let compressed = match read_jpeg_bytes(path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
-                    coord.level, coord.col, coord.row, path, e
-                );
+                Self::log_tile_error("", coord, path, &e);
                 self.clear_in_flight_for_generation(coord, batch_generation);
                 return None;
             }
@@ -335,10 +332,7 @@ impl TileScheduler {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "[TILE ERROR] decode {}/{}_{}; path={:?}: {:?}",
-                    coord.level, coord.col, coord.row, path, e
-                );
+                Self::log_tile_error("decode ", coord, path, &e);
                 None
             }
         };
@@ -357,15 +351,12 @@ impl TileScheduler {
     }
 
     /// Resolve tile coordinates to filesystem paths.
-    ///
-    /// Filters out coordinates whose paths cannot be resolved (e.g. out-of-bounds).
     fn collect_tile_paths(resolver: &TilePathResolver, coords: &[TileCoord]) -> Vec<(TileCoord, PathBuf)> {
         coords
             .iter()
-            .filter_map(|coord| {
-                resolver
-                    .get_tile_path(coord.level, coord.col, coord.row)
-                    .map(|path| (*coord, path))
+            .map(|coord| {
+                let path = resolver.get_tile_path(coord.level, coord.col, coord.row);
+                (*coord, path)
             })
             .collect()
     }
@@ -397,7 +388,7 @@ impl TileScheduler {
         // Load from disk
         let tile_path = {
             let slide = self.slide.read();
-            slide.as_ref()?.resolver.get_tile_path(level, col, row)?
+            slide.as_ref()?.resolver.get_tile_path(level, col, row)
         };
 
         self.load_tile_into_cache(&coord, &tile_path)
@@ -497,24 +488,18 @@ impl TileScheduler {
 
         let num_levels = state.metadata.num_levels();
 
-        // Prefetch all levels where tile count is manageable
+        // Prefetch all levels where tile count is manageable (single pass)
         // Start from lowest resolution (level 0 in dzsave convention) and work up
         let mut levels_to_prefetch = Vec::new();
+        let mut all_coords = Vec::new();
         for level in 0..num_levels {
             if let Some(level_info) = state.metadata.get_level(level as u32) {
-                let total_tiles = level_info.cols * level_info.rows;
-                if total_tiles <= MAX_TILES_PER_LEVEL {
+                if level_info.cols * level_info.rows <= MAX_TILES_PER_LEVEL {
                     levels_to_prefetch.push(level as u32);
-                }
-            }
-        }
-
-        let mut all_coords = Vec::new();
-        for level in &levels_to_prefetch {
-            if let Some(level_info) = state.metadata.get_level(*level) {
-                for row in 0..level_info.rows {
-                    for col in 0..level_info.cols {
-                        all_coords.push(TileCoord::new(*level, col, row));
+                    for row in 0..level_info.rows {
+                        for col in 0..level_info.cols {
+                            all_coords.push(TileCoord::new(level as u32, col, row));
+                        }
                     }
                 }
             }
@@ -648,29 +633,8 @@ impl TileScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::test_utils::{create_test_fastpath, test_compressed_tile};
     use tempfile::TempDir;
-
-    fn create_test_fastpath(dir: &std::path::Path) {
-        // Create metadata.json
-        let metadata = r#"{
-            "dimensions": [2048, 2048],
-            "tile_size": 512,
-            "levels": [
-                {"level": 0, "downsample": 1, "cols": 4, "rows": 4},
-                {"level": 1, "downsample": 2, "cols": 2, "rows": 2}
-            ],
-            "target_mpp": 0.5,
-            "target_magnification": 20.0,
-            "tile_format": "dzsave"
-        }"#;
-
-        fs::write(dir.join("metadata.json"), metadata).unwrap();
-
-        // Create tiles_files directory structure
-        fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
-        fs::create_dir_all(dir.join("tiles_files/1")).unwrap();
-    }
 
     #[test]
     fn test_scheduler_creation() {
@@ -904,76 +868,6 @@ mod tests {
 
     // --- L2 read path tests ---
 
-    /// Create a minimal valid 1x1 white JPEG for L2 tests.
-    /// This is a hand-crafted minimal JFIF JPEG that decodes to a single white pixel.
-    fn create_test_jpeg() -> crate::decoder::CompressedTileData {
-        // Minimal valid JPEG: 1x1 white pixel, baseline, YCbCr
-        // Generated by encoding a 1x1 white image; hardcoded to avoid dev-dependencies.
-        #[rustfmt::skip]
-        let jpeg_bytes: Vec<u8> = vec![
-            // SOI
-            0xFF, 0xD8,
-            // APP0 (JFIF header)
-            0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46,
-            0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01,
-            0x00, 0x00,
-            // DQT (quantization table)
-            0xFF, 0xDB, 0x00, 0x43, 0x00,
-            0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07,
-            0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14,
-            0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12, 0x13,
-            0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A,
-            0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20, 0x22,
-            0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C,
-            0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39,
-            0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32,
-            // SOF0 (start of frame, baseline, 1x1, 3 components)
-            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00,
-            0x01, 0x01, 0x01, 0x11, 0x00,
-            // DHT (Huffman table, DC, table 0)
-            0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
-            0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-            0x0B,
-            // DHT (Huffman table, AC, table 0)
-            0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01,
-            0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04,
-            0x04, 0x00, 0x00, 0x01, 0x7D, 0x01, 0x02, 0x03,
-            0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41,
-            0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14,
-            0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1,
-            0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62,
-            0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19,
-            0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34,
-            0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44,
-            0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54,
-            0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64,
-            0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74,
-            0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84,
-            0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93,
-            0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2,
-            0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA,
-            0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9,
-            0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
-            0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7,
-            0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5,
-            0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3,
-            0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
-            // SOS (start of scan)
-            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
-            0x3F, 0x00, 0x7B, 0x40,
-            // EOI
-            0xFF, 0xD9,
-        ];
-
-        crate::decoder::CompressedTileData {
-            jpeg_bytes: bytes::Bytes::from(jpeg_bytes),
-            width: 1,
-            height: 1,
-        }
-    }
-
     #[test]
     fn test_get_tile_l2_hit() {
         let scheduler = TileScheduler::new(512, 64, 2);
@@ -982,7 +876,7 @@ mod tests {
 
         // Insert valid compressed tile into L2
         let l2_coord = SlideTileCoord::new(slide_id, 0, 0, 0);
-        scheduler.l2_cache.insert(l2_coord, create_test_jpeg());
+        scheduler.l2_cache.insert(l2_coord, test_compressed_tile());
 
 
         // get_tile should find it in L2, decode, and promote to L1
@@ -1003,7 +897,7 @@ mod tests {
 
         // Insert valid compressed tile into L2
         let l2_coord = SlideTileCoord::new(slide_id, 0, 0, 0);
-        scheduler.l2_cache.insert(l2_coord, create_test_jpeg());
+        scheduler.l2_cache.insert(l2_coord, test_compressed_tile());
 
 
         let coord = TileCoord::new(0, 0, 0);
@@ -1029,7 +923,7 @@ mod tests {
 
         // Insert valid compressed tile into L2
         let l2_coord = SlideTileCoord::new(slide_id, 0, 0, 0);
-        scheduler.l2_cache.insert(l2_coord, create_test_jpeg());
+        scheduler.l2_cache.insert(l2_coord, test_compressed_tile());
 
 
         // Bump generation to make stale_gen stale
@@ -1057,7 +951,7 @@ mod tests {
 
         // Insert into L2 only (not L1)
         let l2_coord = SlideTileCoord::new(slide_id, 0, 1, 2);
-        scheduler.l2_cache.insert(l2_coord, create_test_jpeg());
+        scheduler.l2_cache.insert(l2_coord, test_compressed_tile());
 
 
         let tiles = vec![(0, 1, 2), (0, 99, 99)];
@@ -1074,7 +968,7 @@ mod tests {
 
         // Insert into L2 under some slide_id — should NOT be found
         let l2_coord = SlideTileCoord::new(42, 0, 1, 2);
-        scheduler.l2_cache.insert(l2_coord, create_test_jpeg());
+        scheduler.l2_cache.insert(l2_coord, test_compressed_tile());
 
 
         let tiles = vec![(0, 1, 2)];

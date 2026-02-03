@@ -23,6 +23,31 @@ if TYPE_CHECKING:
     from fastpath.core.slide import SlideManager
 
 
+def _parse_tile_url(id: str) -> tuple[int, int, int, int] | None:
+    """Parse a tile URL of the form 'level/col_row?g=generation'.
+
+    Returns (level, col, row, generation) or None if invalid.
+    """
+    url_part, _, query = id.partition("?")
+    parts = url_part.split("/")
+    if len(parts) != 2:
+        return None
+
+    level = int(parts[0])
+    col_row = parts[1].split("_")
+    if len(col_row) != 2:
+        return None
+
+    col = int(col_row[0])
+    row = int(col_row[1])
+
+    generation = 0
+    if query.startswith("g="):
+        generation = int(query[2:])
+
+    return (level, col, row, generation)
+
+
 class TileImageProvider(QQuickImageProvider):
     """Provides tile images to QML.
 
@@ -58,20 +83,10 @@ class TileImageProvider(QQuickImageProvider):
             QImage of the tile
         """
         try:
-            # Strip query string (e.g. "?g=1" used for cache-busting on slide switch)
-            url_part, _, _ = id.partition("?")
-
-            parts = url_part.split("/")
-            if len(parts) != 2:
+            parsed = _parse_tile_url(id)
+            if parsed is None:
                 return self._placeholder
-
-            level = int(parts[0])
-            col_row = parts[1].split("_")
-            if len(col_row) != 2:
-                return self._placeholder
-
-            col = int(col_row[0])
-            row = int(col_row[1])
+            level, col, row, _ = parsed
 
             if not self._rust_scheduler.is_loaded:
                 return self._placeholder
@@ -182,6 +197,21 @@ class AnnotationTileImageProvider(QQuickImageProvider):
             self._transparent_tile = img
         return self._transparent_tile
 
+    def _cache_get(self, key: tuple[int, int, int, int]) -> QImage | None:
+        """Get from LRU cache (promotes to end)."""
+        with self._cache_lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        return None
+
+    def _cache_put(self, key: tuple[int, int, int, int], value: QImage) -> None:
+        """Put into LRU cache (evicts oldest if over capacity)."""
+        with self._cache_lock:
+            self._cache[key] = value
+            if len(self._cache) > self.CACHE_SIZE:
+                self._cache.popitem(last=False)
+
     def requestImage(
         self, id: str, size: QSize, requested_size: QSize  # noqa: ARG002
     ) -> QImage:
@@ -196,31 +226,18 @@ class AnnotationTileImageProvider(QQuickImageProvider):
             QImage with annotations rendered as RGBA
         """
         try:
-            # Parse URL: "level/col_row?g=generation"
-            url_part, _, query = id.partition("?")
-            parts = url_part.split("/")
-            if len(parts) != 2:
+            parsed = _parse_tile_url(id)
+            if parsed is None:
                 return QImage()
-
-            level = int(parts[0])
-            col_row = parts[1].split("_")
-            if len(col_row) != 2:
-                return QImage()
-            col = int(col_row[0])
-            row = int(col_row[1])
-
-            generation = 0
-            if query.startswith("g="):
-                generation = int(query[2:])
+            level, col, row, generation = parsed
 
             tile_size = self._slide_manager.tileSize if self._slide_manager.isLoaded else DEFAULT_TILE_SIZE
 
             # Check LRU cache
             cache_key = (level, col, row, generation)
-            with self._cache_lock:
-                if cache_key in self._cache:
-                    self._cache.move_to_end(cache_key)
-                    return self._cache[cache_key]
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
 
             # Get downsample for this level
             if not self._slide_manager.isLoaded:
@@ -240,10 +257,7 @@ class AnnotationTileImageProvider(QQuickImageProvider):
 
             if not annotations:
                 result = self._get_transparent_tile(tile_size)
-                with self._cache_lock:
-                    self._cache[cache_key] = result
-                    if len(self._cache) > self.CACHE_SIZE:
-                        self._cache.popitem(last=False)
+                self._cache_put(cache_key, result)
                 return result
 
             # Rasterize with PIL
@@ -297,10 +311,7 @@ class AnnotationTileImageProvider(QQuickImageProvider):
             qimage = qimage.copy()  # Detach from raw_data buffer
 
             # Cache result
-            with self._cache_lock:
-                self._cache[cache_key] = qimage
-                if len(self._cache) > self.CACHE_SIZE:
-                    self._cache.popitem(last=False)
+            self._cache_put(cache_key, qimage)
 
             return qimage
 

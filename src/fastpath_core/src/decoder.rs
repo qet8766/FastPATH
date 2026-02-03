@@ -31,11 +31,6 @@ impl TileData {
             height,
         }
     }
-
-    /// Size in bytes.
-    pub fn size_bytes(&self) -> usize {
-        self.data.len()
-    }
 }
 
 /// Compressed JPEG tile data (not yet decoded to RGB).
@@ -53,12 +48,6 @@ pub struct CompressedTileData {
     pub height: u32,
 }
 
-impl CompressedTileData {
-    /// Size in bytes (JPEG compressed size, used for cache weighting).
-    pub fn size_bytes(&self) -> usize {
-        self.jpeg_bytes.len()
-    }
-}
 
 /// Read a JPEG tile file and parse its header for dimensions.
 ///
@@ -167,7 +156,7 @@ mod tests {
             width: 512,
             height: 512,
         };
-        assert_eq!(data.size_bytes(), 1024);
+        assert_eq!(data.jpeg_bytes.len(), 1024);
     }
 
     #[test]

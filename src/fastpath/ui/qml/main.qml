@@ -26,15 +26,18 @@ ApplicationWindow {
     // Mode: false = viewer, true = preprocess
     property bool preprocessMode: false
 
-    Component.onCompleted: {
-        // Restore last annotation tool mode
-        if (Settings.annotationTool === "pan") {
+    function restoreInteractionMode(tool) {
+        if (tool === "pan") {
             viewer.interactionMode = "none"
-        } else if (Settings.annotationTool === "measure") {
+        } else if (tool === "measure") {
             viewer.interactionMode = "measure"
         } else {
             viewer.interactionMode = "draw"
         }
+    }
+
+    Component.onCompleted: {
+        restoreInteractionMode(Settings.annotationTool)
     }
 
     // Menu bar
@@ -461,9 +464,9 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     annotationsVisible: viewer.annotationsVisible
                     onVisibilityToggled: (visible) => { Settings.annotationsVisible = visible }
-                    onExportRequested: (path) => { AnnotationManager.save(path) }
-                    onImportRequested: (path) => { AnnotationManager.load(path) }
-                    onClearRequested: AnnotationManager.clear()
+                    onExportRequested: menuExportDialog.open()
+                    onImportRequested: menuImportDialog.open()
+                    onClearRequested: menuClearConfirmDialog.open()
                 }
 
                 AnnotationTools {
@@ -472,13 +475,7 @@ ApplicationWindow {
                     currentTool: Settings.annotationTool
                     onToolChanged: (tool) => {
                         Settings.annotationTool = tool
-                        if (tool === "pan") {
-                            viewer.interactionMode = "none"
-                        } else if (tool === "measure") {
-                            viewer.interactionMode = "measure"
-                        } else {
-                            viewer.interactionMode = "draw"
-                        }
+                        restoreInteractionMode(tool)
                     }
                 }
 
@@ -509,13 +506,7 @@ ApplicationWindow {
                     x: region.x, y: region.y,
                     width: region.width, height: region.height
                 }
-                if (Settings.annotationTool === "pan") {
-                    viewer.interactionMode = "none"
-                } else if (Settings.annotationTool === "measure") {
-                    viewer.interactionMode = "measure"
-                } else {
-                    viewer.interactionMode = "draw"
-                }
+                restoreInteractionMode(Settings.annotationTool)
             }
         }
 

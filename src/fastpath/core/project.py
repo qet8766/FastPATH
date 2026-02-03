@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
+
+from fastpath.core.paths import atomic_json_save
 
 logger = logging.getLogger(__name__)
 
@@ -177,24 +177,8 @@ class ProjectManager(QObject):
         # Update modified time
         self._project.modified_at = datetime.now(timezone.utc).isoformat()
 
-        # Atomic save: write to temp file in same directory, then rename.
-        # os.replace() is atomic on both POSIX and Windows (same filesystem).
         try:
-            target = self._project_path
-            fd, tmp_path = tempfile.mkstemp(
-                dir=target.parent, suffix=".tmp", prefix=target.stem
-            )
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(self._project.to_dict(), f, indent=2)
-                os.replace(tmp_path, target)
-            except BaseException:
-                # Clean up temp file on any failure (including KeyboardInterrupt)
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            atomic_json_save(self._project_path, self._project.to_dict())
 
             self._set_dirty(False)
             self.projectSaved.emit()

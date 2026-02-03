@@ -97,27 +97,18 @@ pub struct TilePathResolver {
 
 impl TilePathResolver {
     /// Create a new resolver for a .fastpath directory.
-    pub fn new(fastpath_dir: PathBuf) -> TileResult<Self> {
-        Ok(Self { fastpath_dir })
+    pub fn new(fastpath_dir: PathBuf) -> Self {
+        Self { fastpath_dir }
     }
 
     /// Get the file path for a tile.
     ///
-    /// Args:
-    ///     level: Pyramid level number
-    ///     col: Column index
-    ///     row: Row index
-    ///
-    /// Returns:
-    ///     Path to the tile file.
-    pub fn get_tile_path(&self, level: u32, col: u32, row: u32) -> Option<PathBuf> {
-        let path = self.fastpath_dir
+    /// Returns the expected path — actual file existence is checked at decode time.
+    pub fn get_tile_path(&self, level: u32, col: u32, row: u32) -> PathBuf {
+        self.fastpath_dir
             .join("tiles_files")
             .join(level.to_string())
-            .join(format!("{}_{}.jpg", col, row));
-
-        // Return path directly - decode_tile() handles missing files
-        Some(path)
+            .join(format!("{}_{}.jpg", col, row))
     }
 }
 
@@ -156,11 +147,10 @@ mod tests {
         fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
         fs::write(dir.join("tiles_files/0/5_3.jpg"), b"fake").unwrap();
 
-        let resolver = TilePathResolver::new(dir.to_path_buf()).unwrap();
+        let resolver = TilePathResolver::new(dir.to_path_buf());
 
         let path = resolver.get_tile_path(0, 5, 3);
-        assert!(path.is_some());
-        assert!(path.unwrap().ends_with("tiles_files/0/5_3.jpg"));
+        assert!(path.ends_with("tiles_files/0/5_3.jpg"));
     }
 
     #[test]
@@ -172,11 +162,10 @@ mod tests {
 
         fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
 
-        let resolver = TilePathResolver::new(dir.to_path_buf()).unwrap();
+        let resolver = TilePathResolver::new(dir.to_path_buf());
 
         let path = resolver.get_tile_path(0, 99, 99);
-        assert!(path.is_some());
-        assert!(path.unwrap().ends_with("tiles_files/0/99_99.jpg"));
+        assert!(path.ends_with("tiles_files/0/99_99.jpg"));
     }
 
     #[test]

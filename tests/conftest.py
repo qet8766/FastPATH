@@ -116,37 +116,3 @@ def mock_fastpath_dir(temp_dir: Path, sample_rgb_array: np.ndarray) -> Path:
         json.dump({"type": "FeatureCollection", "features": []}, f)
 
     return fastpath_dir
-
-
-@pytest.fixture
-def sample_geojson_annotations() -> dict:
-    """Sample GeoJSON annotation data."""
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "id": "ann_001",
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [
-                        [[100, 100], [200, 100], [200, 200], [100, 200], [100, 100]]
-                    ],
-                },
-                "properties": {
-                    "label": "Tumor",
-                    "color": "#ff0000",
-                    "notes": "Primary tumor region",
-                },
-            },
-            {
-                "type": "Feature",
-                "id": "ann_002",
-                "geometry": {"type": "Point", "coordinates": [300, 300]},
-                "properties": {
-                    "label": "Marker",
-                    "color": "#00ff00",
-                },
-            },
-        ],
-    }

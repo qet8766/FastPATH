@@ -9,6 +9,14 @@ import pytest
 from fastpath_core import RustTileScheduler
 
 
+@pytest.fixture
+def loaded_scheduler(mock_fastpath_dir: Path):
+    """RustTileScheduler pre-loaded with mock .fastpath directory."""
+    scheduler = RustTileScheduler()
+    scheduler.load(str(mock_fastpath_dir))
+    return scheduler
+
+
 class TestRustTileScheduler:
     """Tests for the RustTileScheduler class."""
 
@@ -46,12 +54,9 @@ class TestRustTileScheduler:
         scheduler.close()
         assert not scheduler.is_loaded
 
-    def test_get_metadata(self, mock_fastpath_dir: Path):
+    def test_get_metadata(self, loaded_scheduler):
         """Test getting slide metadata."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
-        metadata = scheduler.get_metadata()
+        metadata = loaded_scheduler.get_metadata()
         assert metadata is not None
         assert metadata["width"] == 2048
         assert metadata["height"] == 2048
@@ -65,45 +70,28 @@ class TestRustTileScheduler:
         scheduler = RustTileScheduler()
         assert scheduler.get_metadata() is None
 
-    def test_get_level_info(self, mock_fastpath_dir: Path):
+    @pytest.mark.parametrize("level, expected_ds, expected_cols, expected_rows", [
+        (0, 4, 1, 1),
+        (1, 2, 2, 2),
+        (2, 1, 4, 4),
+    ])
+    def test_get_level_info(self, loaded_scheduler, level, expected_ds, expected_cols, expected_rows):
         """Test getting level information."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
+        info = loaded_scheduler.get_level_info(level)
+        assert info is not None
+        downsample, cols, rows = info
+        assert downsample == expected_ds
+        assert cols == expected_cols
+        assert rows == expected_rows
 
-        # Level 0 (lowest resolution)
-        info0 = scheduler.get_level_info(0)
-        assert info0 is not None
-        downsample, cols, rows = info0
-        assert downsample == 4
-        assert cols == 1
-        assert rows == 1
+    def test_get_level_info_invalid(self, loaded_scheduler):
+        """Test that invalid level returns None."""
+        assert loaded_scheduler.get_level_info(99) is None
 
-        # Level 1
-        info1 = scheduler.get_level_info(1)
-        assert info1 is not None
-        downsample, cols, rows = info1
-        assert downsample == 2
-        assert cols == 2
-        assert rows == 2
-
-        # Level 2 (highest resolution)
-        info2 = scheduler.get_level_info(2)
-        assert info2 is not None
-        downsample, cols, rows = info2
-        assert downsample == 1
-        assert cols == 4
-        assert rows == 4
-
-        # Invalid level
-        assert scheduler.get_level_info(99) is None
-
-    def test_get_tile(self, mock_fastpath_dir: Path):
+    def test_get_tile(self, loaded_scheduler):
         """Test getting a tile."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # Get a tile that exists
-        tile = scheduler.get_tile(0, 0, 0)
+        tile = loaded_scheduler.get_tile(0, 0, 0)
         assert tile is not None
         data, width, height = tile
         assert isinstance(data, bytes)
@@ -112,13 +100,10 @@ class TestRustTileScheduler:
         # RGB data: width * height * 3 bytes
         assert len(data) == width * height * 3
 
-    def test_get_tile_not_exists(self, mock_fastpath_dir: Path):
+    def test_get_tile_not_exists(self, loaded_scheduler):
         """Test getting a tile that doesn't exist."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # Try to get a tile outside the grid
-        tile = scheduler.get_tile(0, 99, 99)
+        tile = loaded_scheduler.get_tile(0, 99, 99)
         assert tile is None
 
     def test_get_tile_not_loaded(self):
@@ -127,33 +112,27 @@ class TestRustTileScheduler:
         tile = scheduler.get_tile(0, 0, 0)
         assert tile is None
 
-    def test_cache_stats(self, mock_fastpath_dir: Path):
+    def test_cache_stats(self, loaded_scheduler):
         """Test cache statistics."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # Initial stats
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["hits"] == 0
         assert stats["misses"] == 0
 
         # Load tiles from level 2 (highest resolution, 4x4 grid)
-        scheduler.get_tile(2, 0, 0)  # Miss
-        scheduler.get_tile(2, 0, 0)  # Hit
-        scheduler.get_tile(2, 1, 0)  # Miss
+        loaded_scheduler.get_tile(2, 0, 0)  # Miss
+        loaded_scheduler.get_tile(2, 0, 0)  # Hit
+        loaded_scheduler.get_tile(2, 1, 0)  # Miss
 
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["hits"] == 1
         assert stats["misses"] == 2
         assert stats["num_tiles"] == 2
 
-    def test_update_viewport(self, mock_fastpath_dir: Path):
+    def test_update_viewport(self, loaded_scheduler):
         """Test viewport update for prefetching."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # Update viewport - should trigger prefetching
-        scheduler.update_viewport(
+        loaded_scheduler.update_viewport(
             x=0.0,
             y=0.0,
             width=1024.0,
@@ -164,16 +143,13 @@ class TestRustTileScheduler:
         )
 
         # Check that some tiles were prefetched
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["num_tiles"] > 0
 
-    def test_update_viewport_without_velocity(self, mock_fastpath_dir: Path):
+    def test_update_viewport_without_velocity(self, loaded_scheduler):
         """Test viewport update without velocity parameters."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # Update viewport without velocity
-        scheduler.update_viewport(
+        loaded_scheduler.update_viewport(
             x=0.0,
             y=0.0,
             width=512.0,
@@ -182,7 +158,7 @@ class TestRustTileScheduler:
         )
 
         # Should still work
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["num_tiles"] >= 0
 
     def test_clear_cache_on_new_load(self, mock_fastpath_dir: Path):
@@ -224,21 +200,18 @@ class TestRustTileScheduler:
         assert "l2_size_bytes" in stats
         assert "l2_num_tiles" in stats
 
-    def test_l2_populated_on_tile_load(self, mock_fastpath_dir: Path):
+    def test_l2_populated_on_tile_load(self, loaded_scheduler):
         """Test that loading a tile populates the L2 compressed cache."""
-        scheduler = RustTileScheduler()
-        scheduler.load(str(mock_fastpath_dir))
-
         # L2 should be empty initially
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["l2_num_tiles"] == 0
 
         # Load a tile via get_tile (foreground path)
-        tile = scheduler.get_tile(0, 0, 0)
+        tile = loaded_scheduler.get_tile(0, 0, 0)
         assert tile is not None
 
         # L2 should now have 1 tile
-        stats = scheduler.cache_stats()
+        stats = loaded_scheduler.cache_stats()
         assert stats["l2_num_tiles"] == 1
 
     def test_l2_persists_across_slide_switch(self, mock_fastpath_dir: Path):
@@ -286,10 +259,3 @@ class TestRustSchedulerComparisonWithPython:
         assert rust_scheduler.num_levels == python_manager.numLevels
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    """Session-scoped Qt application for tests requiring QObjects."""
-    from PySide6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app

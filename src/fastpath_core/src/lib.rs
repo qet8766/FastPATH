@@ -14,6 +14,8 @@ mod format;
 mod prefetch;
 mod scheduler;
 mod slide_pool;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};

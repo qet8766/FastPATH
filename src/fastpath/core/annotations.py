@@ -16,7 +16,7 @@ from typing import Any, TypedDict
 from PySide6.QtCore import QObject, Signal, Slot, Property
 from rtree import index
 
-from fastpath.core.paths import to_local_path
+from fastpath.core.paths import atomic_json_save, to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,13 @@ class AnnotationManager(QObject):
         self._next_rtree_id = 0
         self._id_to_rtree: dict[str, int] = {}  # annotation_id -> rtree_id
 
+    def _index_insert(self, ann_id: str, bounds: tuple) -> None:
+        """Allocate an R-tree integer ID and insert into the spatial index."""
+        rtree_id = self._next_rtree_id
+        self._next_rtree_id += 1
+        self._id_to_rtree[ann_id] = rtree_id
+        self._index.insert(rtree_id, bounds, obj=ann_id)
+
     @Property(int, notify=annotationsChanged)
     def count(self) -> int:
         """Number of annotations."""
@@ -255,12 +262,8 @@ class AnnotationManager(QObject):
         self._annotations[ann_id] = annotation
         bounds = annotation.bounds()
 
-        # Use thread-safe R-tree access with unique integer ID
         with self._index_lock:
-            rtree_id = self._next_rtree_id
-            self._next_rtree_id += 1
-            self._id_to_rtree[ann_id] = rtree_id
-            self._index.insert(rtree_id, bounds, obj=ann_id)
+            self._index_insert(ann_id, bounds)
 
         self._dirty = True
         self.annotationAdded.emit(ann_id)
@@ -431,11 +434,7 @@ class AnnotationManager(QObject):
 
                 self._annotations[ann_id] = annotation
                 bounds = annotation.bounds()
-
-                rtree_id = self._next_rtree_id
-                self._next_rtree_id += 1
-                self._id_to_rtree[ann_id] = rtree_id
-                self._index.insert(rtree_id, bounds, obj=ann_id)
+                self._index_insert(ann_id, bounds)
                 ids.append(ann_id)
 
         if ids:
@@ -524,23 +523,7 @@ class AnnotationManager(QObject):
         features = [a.to_geojson_feature() for a in self._annotations.values()]
         geojson = {"type": "FeatureCollection", "features": features}
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Atomic save: write to temp file in same directory, then replace.
-        # This avoids partial/corrupted files on crash.
-        fd, tmp_path = tempfile.mkstemp(
-            dir=path.parent, suffix=".tmp", prefix=path.stem
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(geojson, f, indent=2)
-            os.replace(tmp_path, path)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        atomic_json_save(path, geojson)
 
         self._dirty = False
         self.annotationsChanged.emit()
@@ -593,32 +576,27 @@ class AnnotationManager(QObject):
         with self._index_lock:
             for annotation in parsed_annotations:
                 self._annotations[annotation.id] = annotation
-                bounds = annotation.bounds()
-
-                # Use thread-safe integer ID for R-tree
-                rtree_id = self._next_rtree_id
-                self._next_rtree_id += 1
-                self._id_to_rtree[annotation.id] = rtree_id
-                self._index.insert(rtree_id, bounds, obj=annotation.id)
+                self._index_insert(annotation.id, annotation.bounds())
 
             self._id_counter = max(self._id_counter, max_id_num)
 
         self._dirty = False
         self.annotationsChanged.emit()
 
+    def _clear_all(self, dirty: bool) -> None:
+        """Clear all annotations and reset the spatial index."""
+        self._annotations.clear()
+        with self._index_lock:
+            self._index = index.Index()
+            self._id_to_rtree.clear()
+            self._next_rtree_id = 0
+        self._dirty = dirty
+        self.annotationsChanged.emit()
+
     @Slot()
     def clear(self) -> None:
         """Clear all annotations."""
-        self._annotations.clear()
-
-        # Thread-safe reset of R-tree and ID mappings
-        with self._index_lock:
-            self._index = index.Index()  # Create new index
-            self._id_to_rtree.clear()
-            self._next_rtree_id = 0
-
-        self._dirty = True
-        self.annotationsChanged.emit()
+        self._clear_all(dirty=True)
 
     @Slot()
     def reset(self) -> None:
@@ -627,12 +605,4 @@ class AnnotationManager(QObject):
         Intended for slide switches where existing annotations should not
         carry over, without marking the new slide as having unsaved changes.
         """
-        self._annotations.clear()
-
-        with self._index_lock:
-            self._index = index.Index()
-            self._id_to_rtree.clear()
-            self._next_rtree_id = 0
-
-        self._dirty = False
-        self.annotationsChanged.emit()
+        self._clear_all(dirty=False)

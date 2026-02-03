@@ -1,5 +1,6 @@
 //! Thread-safe tile cache using moka (TinyLFU eviction).
 
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,6 +22,35 @@ impl TileCoord {
     }
 }
 
+impl fmt::Display for TileCoord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}_{}", self.level, self.col, self.row)
+    }
+}
+
+/// Tile coordinate key that includes a slide identifier.
+///
+/// Used by `CompressedTileCache` (L2) so tiles from multiple slides
+/// can coexist in the same cache without collisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlideTileCoord {
+    pub slide_id: u64,
+    pub level: u32,
+    pub col: u32,
+    pub row: u32,
+}
+
+impl SlideTileCoord {
+    pub fn new(slide_id: u64, level: u32, col: u32, row: u32) -> Self {
+        Self {
+            slide_id,
+            level,
+            col,
+            row,
+        }
+    }
+}
+
 /// Cache statistics.
 #[derive(Debug, Clone, Default)]
 pub struct CacheStats {
@@ -31,26 +61,52 @@ pub struct CacheStats {
     pub num_tiles: usize,
 }
 
-/// Thread-safe tile cache with TinyLFU eviction.
+/// Trait for cache values that report their size in bytes.
+pub trait Weighted: Clone + Send + Sync + 'static {
+    fn size_bytes(&self) -> usize;
+}
+
+impl Weighted for TileData {
+    fn size_bytes(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl Weighted for CompressedTileData {
+    fn size_bytes(&self) -> usize {
+        self.jpeg_bytes.len()
+    }
+}
+
+/// Thread-safe cache with TinyLFU eviction and hit/miss tracking.
 ///
-/// Uses moka::sync::Cache for O(1) lock-free concurrent reads,
-/// size-aware eviction via a weigher, and internal sharding.
-pub struct TileCache {
-    inner: Cache<TileCoord, TileData>,
+/// Generic over key and value types. Uses moka::sync::Cache for O(1)
+/// lock-free concurrent reads, size-aware eviction via a weigher,
+/// and internal sharding.
+pub struct TrackedCache<K, V>
+where
+    K: Hash + Eq + Send + Sync + Clone + 'static,
+    V: Weighted,
+{
+    inner: Cache<K, V>,
     /// Cache hit count.
     hits: AtomicU64,
     /// Cache miss count.
     misses: AtomicU64,
 }
 
-impl TileCache {
+impl<K, V> TrackedCache<K, V>
+where
+    K: Hash + Eq + Send + Sync + Clone + 'static,
+    V: Weighted,
+{
     /// Create a new cache with the given size limit in megabytes.
     pub fn new(max_size_mb: usize) -> Self {
         let max_bytes = (max_size_mb as u64) * 1024 * 1024;
         let inner = Cache::builder()
             .max_capacity(max_bytes)
-            .weigher(|_key: &TileCoord, value: &TileData| -> u32 {
-                value.size_bytes().try_into().unwrap_or(u32::MAX)
+            .weigher(|_key: &K, value: &V| -> u32 {
+                Weighted::size_bytes(value).try_into().unwrap_or(u32::MAX)
             })
             .build();
         Self {
@@ -60,29 +116,29 @@ impl TileCache {
         }
     }
 
-    /// Get a tile from the cache.
+    /// Get a value from the cache.
     ///
-    /// Returns None if the tile is not cached.
-    pub fn get(&self, coord: &TileCoord) -> Option<TileData> {
-        if let Some(tile) = self.inner.get(coord) {
+    /// Returns None if the key is not cached.
+    pub fn get(&self, key: &K) -> Option<V> {
+        if let Some(value) = self.inner.get(key) {
             self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(tile)
+            Some(value)
         } else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
 
-    /// Insert a tile into the cache.
+    /// Insert a value into the cache.
     ///
     /// Eviction is handled internally by moka when capacity is exceeded.
-    pub fn insert(&self, coord: TileCoord, data: TileData) {
-        self.inner.insert(coord, data);
+    pub fn insert(&self, key: K, value: V) {
+        self.inner.insert(key, value);
     }
 
-    /// Check if a tile is in the cache.
-    pub fn contains(&self, coord: &TileCoord) -> bool {
-        self.inner.contains_key(coord)
+    /// Check if a key is in the cache.
+    pub fn contains(&self, key: &K) -> bool {
+        self.inner.contains_key(key)
     }
 
     /// Clear the cache.
@@ -127,28 +183,14 @@ impl TileCache {
     }
 }
 
-/// Tile coordinate key that includes a slide identifier.
-///
-/// Used by `CompressedTileCache` (L2) so tiles from multiple slides
-/// can coexist in the same cache without collisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SlideTileCoord {
-    pub slide_id: u64,
-    pub level: u32,
-    pub col: u32,
-    pub row: u32,
-}
+/// L1 decoded RGB tile cache — cleared on slide switch.
+pub type TileCache = TrackedCache<TileCoord, TileData>;
 
-impl SlideTileCoord {
-    pub fn new(slide_id: u64, level: u32, col: u32, row: u32) -> Self {
-        Self {
-            slide_id,
-            level,
-            col,
-            row,
-        }
-    }
-}
+/// L2 compressed JPEG cache — persists across slide switches.
+///
+/// Unlike `TileCache` (L1), this cache is **not** cleared on slide switch.
+/// Tiles from different slides are disambiguated by `SlideTileCoord.slide_id`.
+pub type CompressedTileCache = TrackedCache<SlideTileCoord, CompressedTileData>;
 
 /// Compute a slide identifier by hashing its path string.
 ///
@@ -158,87 +200,6 @@ pub fn compute_slide_id(path: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
     hasher.finish()
-}
-
-/// Compressed tile cache (L2) — stores JPEG bytes across slide switches.
-///
-/// Unlike `TileCache` (L1), this cache is **not** cleared on slide switch.
-/// Tiles from different slides are disambiguated by `SlideTileCoord.slide_id`.
-pub struct CompressedTileCache {
-    inner: Cache<SlideTileCoord, CompressedTileData>,
-    hits: AtomicU64,
-    misses: AtomicU64,
-}
-
-impl CompressedTileCache {
-    /// Create a new compressed tile cache with the given size limit in megabytes.
-    pub fn new(max_size_mb: usize) -> Self {
-        let max_bytes = (max_size_mb as u64) * 1024 * 1024;
-        let inner = Cache::builder()
-            .max_capacity(max_bytes)
-            .weigher(|_key: &SlideTileCoord, value: &CompressedTileData| -> u32 {
-                value.size_bytes().try_into().unwrap_or(u32::MAX)
-            })
-            .build();
-        Self {
-            inner,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-        }
-    }
-
-    /// Get a compressed tile from the cache.
-    pub fn get(&self, coord: &SlideTileCoord) -> Option<CompressedTileData> {
-        if let Some(tile) = self.inner.get(coord) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(tile)
-        } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
-
-    /// Insert a compressed tile into the cache.
-    pub fn insert(&self, coord: SlideTileCoord, data: CompressedTileData) {
-        self.inner.insert(coord, data);
-    }
-
-    /// Check if a compressed tile is in the cache.
-    pub fn contains(&self, coord: &SlideTileCoord) -> bool {
-        self.inner.contains_key(coord)
-    }
-
-    /// Get cache statistics (reuses `CacheStats`).
-    pub fn stats(&self) -> CacheStats {
-        self.inner.run_pending_tasks();
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
-        let total = hits + misses;
-        let hit_ratio = if total > 0 {
-            hits as f64 / total as f64
-        } else {
-            0.0
-        };
-        CacheStats {
-            hits,
-            misses,
-            hit_ratio,
-            size_bytes: self.inner.weighted_size() as usize,
-            num_tiles: self.inner.entry_count() as usize,
-        }
-    }
-
-    /// Reset hit/miss counters to zero (tiles are preserved).
-    pub fn reset_stats(&self) {
-        self.hits.store(0, Ordering::Relaxed);
-        self.misses.store(0, Ordering::Relaxed);
-    }
-
-    /// Check if cache is empty.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.inner.entry_count() == 0
-    }
 }
 
 #[cfg(test)]
@@ -357,6 +318,14 @@ mod tests {
         assert_eq!(stats.hit_ratio, 0.0);
         assert_eq!(stats.size_bytes, 0);
         assert_eq!(stats.num_tiles, 0);
+    }
+
+    // --- TileCoord Display ---
+
+    #[test]
+    fn test_tile_coord_display() {
+        let coord = TileCoord::new(2, 5, 3);
+        assert_eq!(format!("{}", coord), "2/5_3");
     }
 
     // --- SlideTileCoord tests ---
@@ -564,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_compressed_cache_no_clear_method() {
-        // CompressedTileCache intentionally has no clear() method.
+        // CompressedTileCache (L2) should not be cleared on slide switch.
         // Verify tiles survive by inserting, then checking they persist
         // after operations that would clear an L1 cache.
         let cache = CompressedTileCache::new(10);

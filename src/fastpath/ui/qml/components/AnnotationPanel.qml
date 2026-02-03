@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import "../style"
 
 ThemedGroupBox {
@@ -10,54 +9,9 @@ ThemedGroupBox {
 
     property bool annotationsVisible: true
     signal visibilityToggled(bool visible)
-    signal exportRequested(string path)
-    signal importRequested(string path)
+    signal exportRequested()
+    signal importRequested()
     signal clearRequested()
-
-    FileDialog {
-        id: exportDialog
-        title: "Export Annotations"
-        nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
-        fileMode: FileDialog.SaveFile
-        defaultSuffix: "geojson"
-        onAccepted: {
-            root.exportRequested(selectedFile.toString())
-        }
-    }
-
-    FileDialog {
-        id: importDialog
-        title: "Import Annotations"
-        nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
-        fileMode: FileDialog.OpenFile
-        onAccepted: {
-            root.importRequested(selectedFile.toString())
-        }
-    }
-
-    Dialog {
-        id: clearConfirmDialog
-        title: "Clear Annotations"
-        modal: true
-        anchors.centerIn: Overlay.overlay
-        width: 300
-        standardButtons: Dialog.Ok | Dialog.Cancel
-
-        background: Rectangle {
-            color: Theme.surface
-            radius: Theme.radiusLarge
-            border.color: Theme.border
-        }
-
-        Label {
-            text: "Remove all " + AnnotationManager.count + " annotations?"
-            color: Theme.text
-            wrapMode: Text.WordWrap
-            width: parent.width
-        }
-
-        onAccepted: root.clearRequested()
-    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -169,7 +123,7 @@ ThemedGroupBox {
                     color: parent.hovered ? Theme.surfaceHover : "transparent"
                     radius: Theme.radiusSmall
                 }
-                onClicked: exportDialog.open()
+                onClicked: root.exportRequested()
             }
 
             Button {
@@ -185,7 +139,7 @@ ThemedGroupBox {
                     color: parent.hovered ? Theme.surfaceHover : "transparent"
                     radius: Theme.radiusSmall
                 }
-                onClicked: importDialog.open()
+                onClicked: root.importRequested()
             }
 
             Item { Layout.fillWidth: true }
@@ -204,7 +158,7 @@ ThemedGroupBox {
                     color: parent.hovered ? Theme.errorBackground : "transparent"
                     radius: Theme.radiusSmall
                 }
-                onClicked: clearConfirmDialog.open()
+                onClicked: root.clearRequested()
             }
         }
     }

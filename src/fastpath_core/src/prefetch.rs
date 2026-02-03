@@ -136,6 +136,19 @@ impl PrefetchCalculator {
         // Calculate extended viewport based on velocity
         let (ext_x, ext_y, ext_w, ext_h) = self.extended_viewport(viewport, metadata.tile_size);
 
+        /// Append tiles to `dest` that aren't already present and aren't cached.
+        fn push_unique_uncached(
+            dest: &mut Vec<TileCoord>,
+            new: Vec<TileCoord>,
+            cached: &impl Fn(&TileCoord) -> bool,
+        ) {
+            for coord in new {
+                if !dest.contains(&coord) && !cached(&coord) {
+                    dest.push(coord);
+                }
+            }
+        }
+
         if let Some(level_info) = metadata.get_level(level) {
             // Add tiles from extended viewport (based on velocity)
             let extended_tiles = self.tiles_in_rect(
@@ -148,17 +161,8 @@ impl PrefetchCalculator {
             );
 
             // Prioritize: visible tiles first, then extended
-            for coord in visible {
-                if !cached(&coord) {
-                    tiles.push(coord);
-                }
-            }
-
-            for coord in extended_tiles {
-                if !tiles.contains(&coord) && !cached(&coord) {
-                    tiles.push(coord);
-                }
-            }
+            push_unique_uncached(&mut tiles, visible, cached);
+            push_unique_uncached(&mut tiles, extended_tiles, cached);
 
             // Optionally prefetch adjacent pyramid levels
             if self.config.prefetch_levels {
@@ -173,18 +177,13 @@ impl PrefetchCalculator {
                             viewport.width,
                             viewport.height,
                         );
-                        for coord in up_tiles {
-                            if !tiles.contains(&coord) && !cached(&coord) {
-                                tiles.push(coord);
-                            }
-                        }
+                        push_unique_uncached(&mut tiles, up_tiles, cached);
                     }
                 }
 
                 // Prefetch one level down (higher resolution) for zooming in
                 if level > 0 {
                     if let Some(down_level) = metadata.get_level(level - 1) {
-                        // Only prefetch center tiles at higher resolution
                         let center_x = viewport.x + viewport.width / 2.0;
                         let center_y = viewport.y + viewport.height / 2.0;
                         let small_width = viewport.width / 4.0;
@@ -198,11 +197,7 @@ impl PrefetchCalculator {
                             small_width,
                             small_height,
                         );
-                        for coord in down_tiles {
-                            if !tiles.contains(&coord) && !cached(&coord) {
-                                tiles.push(coord);
-                            }
-                        }
+                        push_unique_uncached(&mut tiles, down_tiles, cached);
                     }
                 }
             }

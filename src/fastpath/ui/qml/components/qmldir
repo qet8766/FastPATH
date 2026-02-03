@@ -4,7 +4,6 @@ TileLayer 1.0 TileLayer.qml
 FallbackTileLayer 1.0 FallbackTileLayer.qml
 AnnotationOverlay 1.0 AnnotationOverlay.qml
 AnnotationTools 1.0 AnnotationTools.qml
-LayerPanel 1.0 LayerPanel.qml
 PreprocessView 1.0 PreprocessView.qml
 PreprocessForm 1.0 PreprocessForm.qml
 PreprocessFileList 1.0 PreprocessFileList.qml

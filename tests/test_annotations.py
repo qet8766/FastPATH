@@ -6,22 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from fastpath.core.annotations import (
     Annotation,
     AnnotationManager,
     AnnotationType,
 )
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Create a Qt application for testing."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    yield app
 
 
 class TestAnnotation:
