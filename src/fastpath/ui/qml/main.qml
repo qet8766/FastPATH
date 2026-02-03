@@ -374,7 +374,34 @@ ApplicationWindow {
                     onClearRequested: AnnotationManager.clear()
                 }
 
+                PluginPanel {
+                    id: pluginPanel
+                    Layout.fillWidth: true
+                }
+
+                AnnotationFilterPanel {
+                    id: annotationFilterPanel
+                    Layout.fillWidth: true
+                }
+
                 Item { Layout.fillHeight: true }
+            }
+        }
+
+        // Plugin panel ROI wiring
+        Connections {
+            target: pluginPanel
+            function onRoiSelectionRequested() { viewer.interactionMode = "roi" }
+        }
+
+        Connections {
+            target: viewer
+            function onRoiSelected(region) {
+                pluginPanel.selectedRegion = {
+                    x: region.x, y: region.y,
+                    width: region.width, height: region.height
+                }
+                viewer.interactionMode = "none"
             }
         }
     }

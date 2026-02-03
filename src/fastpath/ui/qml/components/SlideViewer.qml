@@ -194,6 +194,39 @@ Item {
         z: 10
     }
 
+    // Forward ROI selection from InteractionLayer
+    Connections {
+        target: interactionLayer
+        function onRoiSelected(region) { root.roiSelected(region) }
+    }
+
+    // Dismiss backdrop for RadialPalette
+    MouseArea {
+        anchors.fill: parent
+        visible: radialPalette.active
+        z: 19
+        onClicked: radialPalette.hide()
+    }
+
+    // Radial label picker overlay
+    RadialPalette {
+        id: radialPalette
+        z: 20
+        items: {
+            let result = []
+            let keys = Object.keys(Theme.cellTypeColors)
+            for (let i = 0; i < keys.length; i++) {
+                result.push({ label: keys[i], color: Theme.cellTypeColors[keys[i]] })
+            }
+            return result
+        }
+        onLabelSelected: (label, color) => {
+            if (radialPalette.annotationId !== "")
+                AnnotationManager.updateProperties(radialPalette.annotationId, label, color)
+            radialPalette.hide()
+        }
+    }
+
     // Update viewport when loaded
     Component.onCompleted: {
         if (SlideManager.isLoaded) {
@@ -208,14 +241,11 @@ Item {
         }
     }
 
-    Connections {
-        target: interactionLayer
-        function onRoiSelected(region) {
-            root.roiSelected(region)
-        }
+    // Public functions
+    function showRadialPaletteAt(annotationId, screenX, screenY) {
+        radialPalette.show(screenX, screenY, annotationId)
     }
 
-    // Public functions
     function updateViewport() {
         root.viewportX = flickable.contentX / root.scale
         root.viewportY = flickable.contentY / root.scale

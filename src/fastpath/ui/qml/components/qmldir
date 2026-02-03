@@ -20,3 +20,6 @@ InteractionLayer 1.0 InteractionLayer.qml
 AnnotationTileLayer 1.0 AnnotationTileLayer.qml
 SelectedAnnotationOverlay 1.0 SelectedAnnotationOverlay.qml
 AnnotationPanel 1.0 AnnotationPanel.qml
+RadialPalette 1.0 RadialPalette.qml
+PluginPanel 1.0 PluginPanel.qml
+AnnotationFilterPanel 1.0 AnnotationFilterPanel.qml

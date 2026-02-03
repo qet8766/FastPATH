@@ -46,6 +46,15 @@ QtObject {
         "#a29bfe",  // Purple
     ]
 
+    // Cell type colors for nucleus segmentation
+    readonly property var cellTypeColors: ({
+        "Neoplastic": "#ff0000",
+        "Inflammatory": "#22dd4d",
+        "Connective": "#235cec",
+        "Dead": "#feff00",
+        "Epithelial": "#ff9f44"
+    })
+
     // Typography
     readonly property int fontSizeSmall: 11
     readonly property int fontSizeNormal: 13
@@ -79,14 +88,4 @@ QtObject {
     readonly property color tileBackground: "#333333"
     readonly property real minScale: 0.01
     readonly property real maxScale: 1.2
-
-    // Cell type colors (for AI plugin annotation groups)
-    readonly property var cellTypeColors: ({
-        "tumor": "#ff6b6b",
-        "stroma": "#4ecdc4",
-        "immune": "#45b7d1",
-        "necrosis": "#96ceb4",
-        "normal": "#ffeaa7",
-        "other": "#dfe6e9"
-    })
 }

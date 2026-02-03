@@ -101,7 +101,11 @@ impl TileCache {
     }
 
     /// Get cache statistics.
+    ///
+    /// Runs pending moka maintenance first so `entry_count()` and
+    /// `weighted_size()` reflect the latest inserts/evictions.
     pub fn stats(&self) -> CacheStats {
+        self.inner.run_pending_tasks();
         let hits = self.hits.load(Ordering::Relaxed);
         let misses = self.misses.load(Ordering::Relaxed);
         let total = hits + misses;

@@ -140,16 +140,12 @@ impl TileScheduler {
     /// Decode a tile from disk and insert it into the cache.
     ///
     /// Called only from foreground `get_tile()` — does NOT use in-flight dedup.
+    /// The caller has already checked the cache, so we decode unconditionally.
     /// If a prefetch thread is concurrently decoding the same tile, both will
     /// produce valid data and moka handles duplicate inserts safely. This avoids
     /// returning `None` to QML (which would cache a placeholder permanently).
     /// Background prefetch dedup is handled separately in `load_tile_for_prefetch()`.
     fn load_tile_into_cache(&self, coord: &TileCoord, path: &std::path::Path) -> Option<TileData> {
-        // Fast path — tile already cached
-        if let Some(tile) = self.cache.get(coord) {
-            return Some(tile);
-        }
-
         match decode_tile(path) {
             Ok(tile) => {
                 self.cache.insert(*coord, tile.clone());
