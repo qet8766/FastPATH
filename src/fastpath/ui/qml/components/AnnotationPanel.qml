@@ -21,12 +21,7 @@ ThemedGroupBox {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "geojson"
         onAccepted: {
-            let path = selectedFile.toString()
-            // Normalize file:/// URL for Windows
-            if (path.startsWith("file:///")) {
-                path = path.substring(8)
-            }
-            root.exportRequested(path)
+            root.exportRequested(selectedFile.toString())
         }
     }
 
@@ -36,11 +31,7 @@ ThemedGroupBox {
         nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
         fileMode: FileDialog.OpenFile
         onAccepted: {
-            let path = selectedFile.toString()
-            if (path.startsWith("file:///")) {
-                path = path.substring(8)
-            }
-            root.importRequested(path)
+            root.importRequested(selectedFile.toString())
         }
     }
 
@@ -81,7 +72,6 @@ ThemedGroupBox {
                 id: visibilitySwitch
                 checked: root.annotationsVisible
                 onCheckedChanged: {
-                    root.annotationsVisible = checked
                     root.visibilityToggled(checked)
                 }
             }

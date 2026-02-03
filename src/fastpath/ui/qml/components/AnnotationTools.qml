@@ -6,7 +6,7 @@ import "../style"
 Rectangle {
     id: root
 
-    property string currentTool: "pan"  // pan, point, rectangle, polygon, freehand
+    property string currentTool: "pan"  // pan, point, rectangle, polygon, freehand, measure
     property string currentColor: Theme.annotationColors[0]
     property string currentLabel: ""
 
@@ -68,6 +68,13 @@ Rectangle {
                 tooltip: "Freehand (F)"
                 selected: root.currentTool === "freehand"
                 onClicked: selectTool("freehand")
+            }
+
+            ToolButton {
+                icon: "📏"
+                tooltip: "Measure (M)"
+                selected: root.currentTool === "measure"
+                onClicked: selectTool("measure")
             }
         }
 
@@ -137,7 +144,6 @@ Rectangle {
     }
 
     function selectTool(tool) {
-        root.currentTool = tool
         root.toolChanged(tool)
     }
 
@@ -165,6 +171,11 @@ Rectangle {
     Shortcut {
         sequence: "F"
         onActivated: selectTool("freehand")
+    }
+
+    Shortcut {
+        sequence: "M"
+        onActivated: selectTool("measure")
     }
 
     // Tool button component

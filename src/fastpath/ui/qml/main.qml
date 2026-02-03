@@ -25,6 +25,17 @@ ApplicationWindow {
     // Mode: false = viewer, true = preprocess
     property bool preprocessMode: false
 
+    Component.onCompleted: {
+        // Restore last annotation tool mode
+        if (Settings.annotationTool === "pan") {
+            viewer.interactionMode = "none"
+        } else if (Settings.annotationTool === "measure") {
+            viewer.interactionMode = "measure"
+        } else {
+            viewer.interactionMode = "draw"
+        }
+    }
+
     // Menu bar
     menuBar: MenuBar {
         background: Rectangle {
@@ -40,6 +51,33 @@ ApplicationWindow {
                 enabled: !preprocessMode
                 onTriggered: fileDialog.open()
             }
+
+            Action {
+                text: qsTr("Open &Project...")
+                shortcut: "Ctrl+Shift+O"
+                enabled: !preprocessMode
+                onTriggered: projectOpenDialog.open()
+            }
+
+            Action {
+                text: qsTr("&Save Project")
+                shortcut: StandardKey.Save
+                enabled: SlideManager.isLoaded && !preprocessMode
+                onTriggered: {
+                    if (!App.saveProject()) {
+                        projectSaveDialog.open()
+                    }
+                }
+            }
+
+            Action {
+                text: qsTr("Save Project &As...")
+                shortcut: StandardKey.SaveAs
+                enabled: SlideManager.isLoaded && !preprocessMode
+                onTriggered: projectSaveDialog.open()
+            }
+
+            MenuSeparator {}
 
             Action {
                 text: qsTr("&Preprocess WSI...")
@@ -145,8 +183,30 @@ ApplicationWindow {
     FolderDialog {
         id: fileDialog
         title: "Open .fastpath Slide Directory"
+        currentFolder: Settings.lastSlideDirUrl
         onAccepted: {
             App.openSlide(selectedFolder.toString())
+        }
+    }
+
+    FileDialog {
+        id: projectOpenDialog
+        title: "Open FastPATH Project"
+        nameFilters: ["FastPATH Projects (*.fpproj)", "All Files (*)"]
+        fileMode: FileDialog.OpenFile
+        onAccepted: {
+            App.openProject(selectedFile.toString())
+        }
+    }
+
+    FileDialog {
+        id: projectSaveDialog
+        title: "Save FastPATH Project"
+        nameFilters: ["FastPATH Projects (*.fpproj)", "All Files (*)"]
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "fpproj"
+        onAccepted: {
+            App.saveProjectAs(selectedFile.toString())
         }
     }
 
@@ -200,11 +260,7 @@ ApplicationWindow {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "geojson"
         onAccepted: {
-            let path = selectedFile.toString()
-            if (path.startsWith("file:///")) {
-                path = path.substring(8)
-            }
-            AnnotationManager.save(path)
+            AnnotationManager.save(selectedFile.toString())
         }
     }
 
@@ -214,11 +270,7 @@ ApplicationWindow {
         nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
         fileMode: FileDialog.OpenFile
         onAccepted: {
-            let path = selectedFile.toString()
-            if (path.startsWith("file:///")) {
-                path = path.substring(8)
-            }
-            AnnotationManager.load(path)
+            AnnotationManager.load(selectedFile.toString())
         }
     }
 
@@ -301,6 +353,41 @@ ApplicationWindow {
                             onClicked: preprocessMode = true
                         }
                     }
+
+                    // Recent slides
+                    ColumnLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: Theme.spacingSmall
+                        visible: App.recentFiles.rowCount() > 0
+
+                        Label {
+                            text: "Recent"
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontSizeSmall
+                            Layout.alignment: Qt.AlignHCenter
+                        }
+
+                        Repeater {
+                            model: App.recentFiles
+
+                            ThemedButton {
+                                required property string fileName
+                                required property string filePath
+                                text: fileName
+                                buttonSize: "normal"
+                                implicitWidth: 420
+                                onClicked: App.openSlide(filePath)
+                            }
+                        }
+
+                        ThemedButton {
+                            text: "Clear Recent"
+                            variant: "outline"
+                            buttonSize: "small"
+                            implicitWidth: 140
+                            onClicked: App.clearRecentSlides()
+                        }
+                    }
                 }
             }
 
@@ -319,6 +406,10 @@ ApplicationWindow {
                 id: viewer
                 anchors.fill: parent
                 visible: SlideManager.isLoaded && !preprocessMode
+                annotationsVisible: Settings.annotationsVisible
+                drawTool: Settings.annotationTool
+                drawLabel: annotationTools.currentLabel
+                drawColor: annotationTools.currentColor
             }
         }
 
@@ -368,10 +459,26 @@ ApplicationWindow {
                 AnnotationPanel {
                     Layout.fillWidth: true
                     annotationsVisible: viewer.annotationsVisible
-                    onVisibilityToggled: (visible) => { viewer.annotationsVisible = visible }
+                    onVisibilityToggled: (visible) => { Settings.annotationsVisible = visible }
                     onExportRequested: (path) => { AnnotationManager.save(path) }
                     onImportRequested: (path) => { AnnotationManager.load(path) }
                     onClearRequested: AnnotationManager.clear()
+                }
+
+                AnnotationTools {
+                    id: annotationTools
+                    Layout.fillWidth: true
+                    currentTool: Settings.annotationTool
+                    onToolChanged: (tool) => {
+                        Settings.annotationTool = tool
+                        if (tool === "pan") {
+                            viewer.interactionMode = "none"
+                        } else if (tool === "measure") {
+                            viewer.interactionMode = "measure"
+                        } else {
+                            viewer.interactionMode = "draw"
+                        }
+                    }
                 }
 
                 PluginPanel {
@@ -401,7 +508,20 @@ ApplicationWindow {
                     x: region.x, y: region.y,
                     width: region.width, height: region.height
                 }
-                viewer.interactionMode = "none"
+                if (Settings.annotationTool === "pan") {
+                    viewer.interactionMode = "none"
+                } else if (Settings.annotationTool === "measure") {
+                    viewer.interactionMode = "measure"
+                } else {
+                    viewer.interactionMode = "draw"
+                }
+            }
+        }
+
+        Connections {
+            target: App
+            function onProjectViewStateReady(x, y, scale) {
+                viewer.setViewState(x, y, scale)
             }
         }
     }
@@ -440,6 +560,9 @@ ApplicationWindow {
                         let info = "Level: " + viewer.currentLevel + " | Tiles: " + App.tileModel.rowCount()
                         if (AnnotationManager.count > 0) {
                             info += " | Annotations: " + AnnotationManager.count
+                        }
+                        if (viewer.hasMeasurement) {
+                            info += " | Measure: " + viewer.lastMeasurementDistance.toFixed(0) + " px"
                         }
                         return info
                     }

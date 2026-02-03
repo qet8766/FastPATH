@@ -105,7 +105,7 @@ class TileModel(QAbstractListModel):
         if new_keys == self._tiles_key_cache:
             return  # Skip - same tiles visible
 
-        logger.info("TileModel.batchUpdate: %d tiles (levels: %s)",
+        logger.debug("TileModel.batchUpdate: %d tiles (levels: %s)",
                     len(tiles), sorted(set(t["level"] for t in tiles)) if tiles else [])
 
         self.beginResetModel()
@@ -131,6 +131,26 @@ class RecentFilesModel(QAbstractListModel):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._files: list[dict] = []
+
+    def setPaths(self, paths: list[str]) -> None:
+        """Replace the recent list from an ordered list of paths (most-recent first)."""
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for p in paths:
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            deduped.append(p)
+            if len(deduped) >= MAX_RECENT_FILES:
+                break
+
+        self.beginResetModel()
+        self._files = [{"path": p, "name": Path(p).name} for p in deduped]
+        self.endResetModel()
+
+    def getPaths(self) -> list[str]:
+        """Return recent paths (most-recent first)."""
+        return [f["path"] for f in self._files]
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return len(self._files)

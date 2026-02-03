@@ -13,14 +13,16 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
 from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
+from fastpath.core.paths import to_local_path
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
+from fastpath.core.project import ProjectManager
 from fastpath.plugins.controller import PluginController
 from fastpath.ui.providers import TileImageProvider, ThumbnailProvider, AnnotationTileImageProvider
 from fastpath.ui.models import TileModel, RecentFilesModel
 from fastpath.ui.navigator import SlideNavigator
 from fastpath.ui.settings import Settings
-from fastpath.ui.preprocess import PreprocessController, _normalize_file_url
+from fastpath.ui.preprocess import PreprocessController
 from fastpath_core import RustTileScheduler
 
 logger = logging.getLogger(__name__)
@@ -76,20 +78,26 @@ class AppController(QObject):
     scaleChanged = Signal()
     viewportChanged = Signal()
     errorOccurred = Signal(str)  # Error message signal for QML
+    projectChanged = Signal()
+    projectViewStateReady = Signal(float, float, float)  # x, y, scale
 
     def __init__(
         self,
         slide_manager: SlideManager,
         annotation_manager: AnnotationManager,
+        project_manager: ProjectManager,
         plugin_manager: PluginController,
         rust_scheduler: RustTileScheduler,
+        settings: Settings,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._slide_manager = slide_manager
         self._annotation_manager = annotation_manager
+        self._project_manager = project_manager
         self._plugin_manager = plugin_manager
         self._rust_scheduler = rust_scheduler
+        self._settings = settings
         self._tile_model = TileModel(self)
         self._fallback_tile_model = TileModel(self)
         self._recent_files = RecentFilesModel(self)
@@ -113,9 +121,19 @@ class AppController(QObject):
         # Multi-slide navigation
         self._navigator = SlideNavigator(self)
 
+        # Load persisted recent slides
+        self._recent_files.setPaths(self._settings.get_recent_slide_paths())
+
         # Connect signals
         self._slide_manager.slideLoaded.connect(self._on_slide_loaded)
         self._slide_manager.slideClosed.connect(self._on_slide_closed)
+        for sig in (
+            self._project_manager.projectLoaded,
+            self._project_manager.projectSaved,
+            self._project_manager.projectClosed,
+            self._project_manager.dirtyChanged,
+        ):
+            sig.connect(self.projectChanged.emit)
 
     @Property(QObject, constant=True)
     def slideManager(self) -> SlideManager:
@@ -152,6 +170,18 @@ class AppController(QObject):
         """Multi-slide navigator."""
         return self._navigator
 
+    @Property(bool, notify=projectChanged)
+    def projectLoaded(self) -> bool:
+        return self._project_manager.isLoaded
+
+    @Property(bool, notify=projectChanged)
+    def projectDirty(self) -> bool:
+        return self._project_manager.isDirty
+
+    @Property(str, notify=projectChanged)
+    def projectPath(self) -> str:
+        return self._project_manager.projectPath
+
     @Property(str, notify=slidePathChanged)
     def currentPath(self) -> str:
         """Current slide path."""
@@ -183,9 +213,7 @@ class AppController(QObject):
             self._loading = True
 
         try:
-            # Handle file:// URLs and normalize path
-            path = _normalize_file_url(path)
-            resolved = Path(path).resolve()
+            resolved = to_local_path(path).expanduser().resolve()
 
             if not resolved.exists():
                 logger.error("Slide not found: %s", resolved)
@@ -226,6 +254,10 @@ class AppController(QObject):
             self._current_path = str(resolved)
             self.slidePathChanged.emit()
             self._recent_files.addFile(str(resolved), resolved.name)
+            self._settings.set_recent_slide_paths(self._recent_files.getPaths())
+            self._settings.lastSlideDirUrl = QUrl.fromLocalFile(
+                str(resolved.parent)
+            ).toString()
             self._navigator.scanDirectory(str(resolved))
             return True
 
@@ -247,6 +279,109 @@ class AppController(QObject):
         self._tile_model.clear()
         self._fallback_tile_model.clear()
         self._previous_level = -1
+
+    @Slot()
+    def clearRecentSlides(self) -> None:
+        """Clear the persisted recent slide list."""
+        self._recent_files.clear()
+        self._settings.set_recent_slide_paths([])
+
+    @Slot(str, result=bool)
+    def openProject(self, path: str) -> bool:
+        """Open a project file (.fpproj) and restore slide/view/annotations."""
+        if not path.strip():
+            return False
+
+        project_path = to_local_path(path).expanduser()
+        if not project_path.exists():
+            self.errorOccurred.emit(f"Project file not found: {project_path}")
+            return False
+
+        if not self._project_manager.loadProject(str(project_path)):
+            self.errorOccurred.emit(f"Failed to load project: {project_path}")
+            return False
+
+        slide_path_str = self._project_manager.slidePath
+        if not slide_path_str:
+            self.errorOccurred.emit("Project is missing a slide path")
+            return False
+
+        slide_path = to_local_path(slide_path_str).expanduser()
+        if not slide_path.exists():
+            self.errorOccurred.emit(f"Slide not found: {slide_path}")
+            return False
+
+        if not self.openSlide(str(slide_path)):
+            return False
+
+        # Restore annotations
+        self._annotation_manager.reset()
+        annotations_path = self._project_manager.annotationsFile
+        if annotations_path:
+            self._annotation_manager.load(annotations_path)
+
+        # Restore view state (QML applies it to SlideViewer)
+        view_state = self._project_manager.getViewState()
+        if view_state:
+            try:
+                x = float(view_state.get("x", 0.0))
+                y = float(view_state.get("y", 0.0))
+                scale = float(view_state.get("scale", 0.1))
+                self.projectViewStateReady.emit(x, y, scale)
+            except (TypeError, ValueError):
+                pass
+
+        return True
+
+    @Slot(result=bool)
+    def saveProject(self) -> bool:
+        """Save the current project to its existing path."""
+        if not self._project_manager.isLoaded or not self._project_manager.projectPath:
+            return False
+
+        return self._save_project(Path(self._project_manager.projectPath))
+
+    @Slot(str, result=bool)
+    def saveProjectAs(self, path: str) -> bool:
+        """Save the current project to a new path (Save As...)."""
+        if not path.strip():
+            return False
+
+        project_path = to_local_path(path).expanduser()
+        return self._save_project(project_path)
+
+    def _save_project(self, project_path: Path) -> bool:
+        """Persist project + annotations."""
+        if not self._slide_manager.isLoaded or not self._current_path:
+            self.errorOccurred.emit("No slide loaded")
+            return False
+
+        project_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not self._project_manager.isLoaded:
+            annotations_path = str(project_path.with_suffix(".geojson"))
+            self._project_manager.newProject(self._current_path, annotations_path)
+        else:
+            annotations_path = self._project_manager.annotationsFile
+            if not annotations_path:
+                annotations_path = str(project_path.with_suffix(".geojson"))
+                self._project_manager.setAnnotationsFile(annotations_path)
+
+        # Capture current view state (viewport top-left in slide coords)
+        self._project_manager.setSlidePath(self._current_path)
+        self._project_manager.updateViewState(self._viewport_x, self._viewport_y, self._scale)
+
+        try:
+            self._annotation_manager.save(annotations_path)
+        except Exception as e:
+            self.errorOccurred.emit(f"Failed to save annotations: {e}")
+            return False
+
+        if not self._project_manager.saveProject(str(project_path)):
+            self.errorOccurred.emit(f"Failed to save project: {project_path}")
+            return False
+
+        return True
 
     @Slot(result=bool)
     def openNextSlide(self) -> bool:
@@ -321,7 +456,7 @@ class AppController(QObject):
             self._viewport_height,
             self._scale,
         )
-        logger.info(
+        logger.debug(
             "_update_tiles: scale=%.4f level=%d viewport=(%.0f,%.0f,%.0f,%.0f) tiles=%d",
             self._scale,
             self._slide_manager.getLevelForScale(self._scale),
@@ -434,6 +569,8 @@ def run_app(args: list[str] | None = None) -> int:
     slide_manager = SlideManager()
     annotation_manager = AnnotationManager()
     plugin_manager = PluginController()
+    settings = Settings()
+    project_manager = ProjectManager()
 
     # Create Rust scheduler with configured cache and prefetch settings
     rust_scheduler = RustTileScheduler(
@@ -450,9 +587,13 @@ def run_app(args: list[str] | None = None) -> int:
     cache_stats_provider = CacheStatsProvider(rust_scheduler)
 
     controller = AppController(
-        slide_manager, annotation_manager, plugin_manager, rust_scheduler
+        slide_manager,
+        annotation_manager,
+        project_manager,
+        plugin_manager,
+        rust_scheduler,
+        settings,
     )
-    settings = Settings()
     preprocess_controller = PreprocessController(settings=settings)
 
     # Apply saved settings to preprocess controller

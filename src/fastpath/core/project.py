@@ -98,6 +98,11 @@ class ProjectManager(QObject):
         """Path to the slide in the current project."""
         return self._project.slide_path if self._project else ""
 
+    @Property(str, notify=projectLoaded)
+    def annotationsFile(self) -> str:
+        """Path to the annotations file in the current project."""
+        return self._project.annotations_file if self._project else ""
+
     def _set_dirty(self, dirty: bool) -> None:
         if self._dirty != dirty:
             self._dirty = dirty
@@ -239,6 +244,22 @@ class ProjectManager(QObject):
         if self._project:
             self._project.metadata[key] = value
             self._set_dirty(True)
+
+    @Slot(str)
+    def setSlidePath(self, path: str) -> None:
+        """Update the slide path stored in the project."""
+        if self._project:
+            self._project.slide_path = path
+            self._set_dirty(True)
+            self.projectLoaded.emit()
+
+    @Slot(str)
+    def setAnnotationsFile(self, path: str) -> None:
+        """Update the annotations file path stored in the project."""
+        if self._project:
+            self._project.annotations_file = path
+            self._set_dirty(True)
+            self.projectLoaded.emit()
 
     @Slot(str, result=str)
     def getMetadata(self, key: str) -> str:

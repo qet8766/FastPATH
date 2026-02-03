@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Property, QThread, Slot
 
+from fastpath.core.paths import to_local_path
 from fastpath.config import VIPS_CONCURRENCY, WSI_EXTENSIONS
 from fastpath.ui.models import (
     FileListModel,
@@ -25,15 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_file_url(path: str) -> str:
-    """Convert file:// URL to local filesystem path.
-
-    Handles both file:/// (Windows) and file:// (Unix) prefixes.
-    """
-    if path.startswith("file:///"):
-        return path[8:]
-    elif path.startswith("file://"):
-        return path[7:]
-    return path
+    """Convert a QML ``file://`` URL or plain path to a local path string."""
+    return str(to_local_path(path))
 
 
 def _map_stage_to_progress(stage: str, current: int, total: int) -> float:

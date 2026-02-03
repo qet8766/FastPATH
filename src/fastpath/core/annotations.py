@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,6 +15,8 @@ from typing import Any, TypedDict
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 from rtree import index
+
+from fastpath.core.paths import to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -516,12 +520,27 @@ class AnnotationManager(QObject):
     @Slot(str)
     def save(self, path: str) -> None:
         """Save annotations to GeoJSON file."""
-        path = Path(path)
+        path = to_local_path(path)
         features = [a.to_geojson_feature() for a in self._annotations.values()]
         geojson = {"type": "FeatureCollection", "features": features}
 
-        with open(path, "w") as f:
-            json.dump(geojson, f, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Atomic save: write to temp file in same directory, then replace.
+        # This avoids partial/corrupted files on crash.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=path.parent, suffix=".tmp", prefix=path.stem
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(geojson, f, indent=2)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         self._dirty = False
         self.annotationsChanged.emit()
@@ -533,7 +552,7 @@ class AnnotationManager(QObject):
         Validates JSON and parses features before acquiring lock to minimize
         lock hold time. Only state updates are performed under the lock.
         """
-        path = Path(path)
+        path = to_local_path(path)
         if not path.exists():
             logger.warning("Annotation file not found: %s", path)
             return
@@ -599,4 +618,21 @@ class AnnotationManager(QObject):
             self._next_rtree_id = 0
 
         self._dirty = True
+        self.annotationsChanged.emit()
+
+    @Slot()
+    def reset(self) -> None:
+        """Clear all annotations and mark state clean.
+
+        Intended for slide switches where existing annotations should not
+        carry over, without marking the new slide as having unsaved changes.
+        """
+        self._annotations.clear()
+
+        with self._index_lock:
+            self._index = index.Index()
+            self._id_to_rtree.clear()
+            self._next_rtree_id = 0
+
+        self._dirty = False
         self.annotationsChanged.emit()

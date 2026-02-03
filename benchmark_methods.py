@@ -1,15 +1,16 @@
-"""Benchmark: Level 1 (direct) vs Level 0 (resized to MPP 0.5)."""
+"""Benchmark preprocessing runtime and output size.
 
+This script is intentionally simple and uses the current preprocessing pipeline
+(``VipsPyramidBuilder``). The older ``method=...`` benchmark was removed when the
+builder API was simplified.
+"""
+
+import argparse
 import csv
 import time
 from pathlib import Path
 
 from fastpath.preprocess.pyramid import VipsPyramidBuilder
-
-SLIDES_DIR = Path("example_wsi")
-OUTPUT_BASE = Path("benchmark_output")
-RUNS = 2
-
 
 def get_dir_size_mb(path: Path) -> float:
     """Get total size of directory in MB."""
@@ -17,19 +18,20 @@ def get_dir_size_mb(path: Path) -> float:
     return total / (1024 * 1024)
 
 
-def benchmark_method(method: str, label: str) -> list[dict]:
-    """Benchmark all slides with given method."""
+def benchmark(slides_dir: Path, output_base: Path, tile_size: int, runs: int) -> list[dict]:
+    """Benchmark all slides with the current builder."""
     results = []
-    output_dir = OUTPUT_BASE / label
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    slides = list(SLIDES_DIR.glob("*.svs"))
+    output_base.mkdir(parents=True, exist_ok=True)
+    slides = sorted(slides_dir.glob("*.svs"))
 
     for slide in slides:
-        for run in range(1, RUNS + 1):
-            print(f"\n=== {slide.name} | {label} | Run {run} ===")
+        for run in range(1, runs + 1):
+            label = f"tile{tile_size}"
+            output_dir = output_base / label
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-            builder = VipsPyramidBuilder(method=method)
+            print(f"\n=== {slide.name} | {label} | Run {run} ===")
+            builder = VipsPyramidBuilder(tile_size=tile_size)
 
             start = time.perf_counter()
             result_path = builder.build(slide, output_dir, force=True)
@@ -39,7 +41,8 @@ def benchmark_method(method: str, label: str) -> list[dict]:
 
             results.append({
                 "slide": slide.name,
-                "method": label,
+                "label": label,
+                "tile_size": tile_size,
                 "run": run,
                 "time_seconds": round(elapsed, 2),
                 "output_size_mb": round(size_mb, 1),
@@ -50,19 +53,23 @@ def benchmark_method(method: str, label: str) -> list[dict]:
 
 
 def main():
-    all_results = []
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--slides-dir", default="WSI_examples")
+    parser.add_argument("--output-base", default="benchmark_output")
+    parser.add_argument("--tile-size", type=int, default=512)
+    parser.add_argument("--runs", type=int, default=2)
+    args = parser.parse_args()
 
-    # Method A: Current approach (level 1, ~MPP 1.0)
-    all_results.extend(benchmark_method("level1", "level1_mpp1.0"))
+    slides_dir = Path(args.slides_dir)
+    output_base = Path(args.output_base)
 
-    # Method B: New approach (level 0 resized to MPP 0.5)
-    all_results.extend(benchmark_method("level0_resized", "level0_mpp0.5"))
+    all_results = benchmark(slides_dir, output_base, args.tile_size, args.runs)
 
     # Write CSV
-    csv_path = OUTPUT_BASE / "benchmark_results.csv"
+    csv_path = output_base / "benchmark_results.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["slide", "method", "run", "time_seconds", "output_size_mb"]
+            f, fieldnames=["slide", "label", "tile_size", "run", "time_seconds", "output_size_mb"]
         )
         writer.writeheader()
         writer.writerows(all_results)

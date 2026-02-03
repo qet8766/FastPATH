@@ -17,6 +17,13 @@ Item {
     property bool annotationsVisible: true
     property string selectedAnnotationId: ""
     property alias interactionMode: interactionLayer.mode
+    property string drawTool: "pan"
+    property string drawLabel: ""
+    property string drawColor: Theme.annotationColors[0]
+
+    // Measurement state (slide pixels)
+    property bool hasMeasurement: false
+    property real lastMeasurementDistance: 0
 
     // Forward ROI signal from InteractionLayer
     signal roiSelected(rect region)
@@ -96,6 +103,8 @@ Item {
                 slideScale: root.scale
                 contentX: flickable.contentX
                 contentY: flickable.contentY
+                drawTool: root.drawTool
+                drawColor: root.drawColor
                 z: 2
             }
         }
@@ -198,6 +207,24 @@ Item {
     Connections {
         target: interactionLayer
         function onRoiSelected(region) { root.roiSelected(region) }
+
+        function onDrawingFinished(toolType, coordinates) {
+            // Create annotation in slide coordinates (level 0)
+            let annId = AnnotationManager.addAnnotation(
+                toolType,
+                coordinates,
+                root.drawLabel,
+                root.drawColor
+            )
+            if (annId) {
+                root.selectedAnnotationId = annId
+            }
+        }
+
+        function onMeasurementFinished(points, distance) {
+            root.hasMeasurement = true
+            root.lastMeasurementDistance = distance
+        }
     }
 
     // Dismiss backdrop for RadialPalette
@@ -309,6 +336,20 @@ Item {
         root.scale = 1.0
         flickable.contentX = 0
         flickable.contentY = 0
+        updateViewport()
+    }
+
+    function setViewState(viewX: real, viewY: real, viewScale: real) {
+        if (!SlideManager.isLoaded) return
+
+        let newScale = Math.max(Theme.minScale, Math.min(Theme.maxScale, viewScale))
+        root.scale = newScale
+
+        let maxX = Math.max(0, contentContainer.width - flickable.width)
+        let maxY = Math.max(0, contentContainer.height - flickable.height)
+
+        flickable.contentX = Math.max(0, Math.min(maxX, viewX * newScale))
+        flickable.contentY = Math.max(0, Math.min(maxY, viewY * newScale))
         updateViewport()
     }
 
