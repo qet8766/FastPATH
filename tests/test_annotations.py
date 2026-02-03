@@ -362,3 +362,144 @@ class TestAnnotationGeoJSONRoundTrip:
         assert restored.id == original.id
         assert restored.type == original.type
         assert len(restored.coordinates) == len(original.coordinates)
+
+
+class TestAnnotationBatchOperations:
+    """Tests for batch/bulk annotation operations."""
+
+    def test_add_batch(self, qapp):
+        """Should add a batch of annotations and return IDs."""
+        manager = AnnotationManager()
+        batch = [
+            {"type": "polygon", "coordinates": [[0, 0], [100, 0], [100, 100], [0, 100]], "label": "A"},
+            {"type": "polygon", "coordinates": [[200, 200], [300, 200], [300, 300], [200, 300]], "label": "B"},
+            {"type": "point", "coordinates": [[500, 500]], "label": "C"},
+        ]
+
+        ids = manager.addAnnotationsBatch(batch, group="tumors")
+        assert len(ids) == 3
+        assert manager.count == 3
+        for ann_id in ids:
+            assert ann_id.startswith("ann_")
+
+    def test_batch_single_signal(self, qapp):
+        """Batch add should emit exactly 1 annotationsChanged signal."""
+        manager = AnnotationManager()
+        changed_count = []
+        manager.annotationsChanged.connect(lambda: changed_count.append(1))
+
+        batch = [
+            {"type": "point", "coordinates": [[i * 10, i * 10]]}
+            for i in range(50)
+        ]
+        manager.addAnnotationsBatch(batch, group="test")
+
+        # Exactly 1 annotationsChanged signal for the entire batch
+        assert len(changed_count) == 1
+        assert manager.count == 50
+
+    def test_group_operations(self, qapp):
+        """Should support group queries."""
+        manager = AnnotationManager()
+        manager.addAnnotationsBatch(
+            [{"type": "point", "coordinates": [[i, i]]} for i in range(5)],
+            group="alpha",
+        )
+        manager.addAnnotationsBatch(
+            [{"type": "point", "coordinates": [[i + 100, i + 100]]} for i in range(3)],
+            group="beta",
+        )
+
+        groups = manager.getGroups()
+        assert set(groups) == {"alpha", "beta"}
+        assert manager.getGroupCount("alpha") == 5
+        assert manager.getGroupCount("beta") == 3
+
+        alpha_anns = manager.getAnnotationsByGroup("alpha")
+        assert len(alpha_anns) == 5
+        for ann in alpha_anns:
+            assert ann["group"] == "alpha"
+
+    def test_remove_batch(self, qapp):
+        """Should remove a subset of annotations."""
+        manager = AnnotationManager()
+        ids = manager.addAnnotationsBatch(
+            [{"type": "point", "coordinates": [[i, i]]} for i in range(10)],
+            group="test",
+        )
+
+        # Remove first 3
+        manager.removeAnnotationsBatch(ids[:3])
+        assert manager.count == 7
+
+        # Removed IDs should return None
+        for removed_id in ids[:3]:
+            assert manager.getAnnotation(removed_id) is None
+
+        # Remaining should still be accessible
+        for kept_id in ids[3:]:
+            assert manager.getAnnotation(kept_id) is not None
+
+    def test_remove_by_group(self, qapp):
+        """Should remove all annotations in a group."""
+        manager = AnnotationManager()
+        manager.addAnnotationsBatch(
+            [{"type": "point", "coordinates": [[i, i]]} for i in range(5)],
+            group="to_remove",
+        )
+        manager.addAnnotationsBatch(
+            [{"type": "point", "coordinates": [[i + 100, i + 100]]} for i in range(3)],
+            group="to_keep",
+        )
+
+        removed = manager.removeAnnotationsByGroup("to_remove")
+        assert removed == 5
+        assert manager.count == 3
+        assert manager.getGroups() == ["to_keep"]
+
+    def test_batch_group_in_geojson(self, qapp, temp_dir: Path):
+        """Group property should survive save/load round-trip."""
+        manager = AnnotationManager()
+        manager.addAnnotationsBatch(
+            [{"type": "polygon", "coordinates": [[0, 0], [10, 0], [10, 10], [0, 10]], "label": "X"}],
+            group="tumors",
+        )
+
+        save_path = temp_dir / "batch_groups.geojson"
+        manager.save(str(save_path))
+
+        manager2 = AnnotationManager()
+        manager2.load(str(save_path))
+        assert manager2.count == 1
+
+        all_anns = manager2.getAllAnnotations()
+        assert all_anns[0]["group"] == "tumors"
+
+    def test_batch_rtree_query(self, qapp):
+        """Batch-added items should be queryable via queryViewport."""
+        manager = AnnotationManager()
+        manager.addAnnotationsBatch(
+            [
+                {"type": "rectangle", "coordinates": [[10, 10], [90, 90]], "label": "Inside"},
+                {"type": "rectangle", "coordinates": [[500, 500], [600, 600]], "label": "Outside"},
+            ],
+            group="test",
+        )
+
+        results = manager.queryViewport(0, 0, 100, 100)
+        assert len(results) == 1
+        assert results[0]["label"] == "Inside"
+
+    def test_batch_skips_empty_coordinates(self, qapp):
+        """Batch add should skip entries with empty coordinates."""
+        manager = AnnotationManager()
+        ids = manager.addAnnotationsBatch(
+            [
+                {"type": "point", "coordinates": [[10, 10]]},
+                {"type": "point", "coordinates": []},  # empty
+                {"type": "point", "coordinates": [[20, 20]]},
+            ],
+            group="test",
+        )
+        assert len(ids) == 2
+        assert manager.count == 2

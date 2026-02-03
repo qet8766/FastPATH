@@ -27,6 +27,7 @@ class AnnotationDict(TypedDict):
     color: str
     notes: str
     bounds: list[float]
+    group: str
 
 
 class AnnotationType(str, Enum):
@@ -73,6 +74,14 @@ class Annotation:
     @notes.setter
     def notes(self, value: str) -> None:
         self.properties["notes"] = value
+
+    @property
+    def group(self) -> str:
+        return self.properties.get("group", "default")
+
+    @group.setter
+    def group(self, value: str) -> None:
+        self.properties["group"] = value
 
     def bounds(self) -> tuple[float, float, float, float]:
         """Get bounding box (minx, miny, maxx, maxy)."""
@@ -174,6 +183,8 @@ class AnnotationManager(QObject):
     annotationAdded = Signal(str)  # annotation id
     annotationRemoved = Signal(str)  # annotation id
     annotationModified = Signal(str)  # annotation id
+    annotationsBatchAdded = Signal(int)  # count of annotations added
+    groupsChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -376,7 +387,131 @@ class AnnotationManager(QObject):
             color=annotation.color,
             notes=annotation.notes,
             bounds=list(annotation.bounds()),
+            group=annotation.group,
         )
+
+    @Slot(list, str, result="QVariantList")
+    def addAnnotationsBatch(
+        self,
+        annotations: list[dict],
+        group: str = "default",
+    ) -> list[str]:
+        """Add multiple annotations in a single batch.
+
+        Args:
+            annotations: List of dicts with keys: type, coordinates, label, color
+            group: Group name for all annotations in this batch
+
+        Returns:
+            List of annotation IDs
+        """
+        ids: list[str] = []
+        with self._index_lock:
+            for ann_data in annotations:
+                coords_raw = ann_data.get("coordinates", [])
+                if not coords_raw:
+                    continue
+
+                ann_id = self._generate_id()
+                coords = [tuple(c) for c in coords_raw]
+                annotation = Annotation(
+                    id=ann_id,
+                    type=AnnotationType(ann_data.get("type", "polygon")),
+                    coordinates=coords,
+                    properties={
+                        "label": ann_data.get("label", ""),
+                        "color": ann_data.get("color", "#ff6b6b"),
+                        "group": group,
+                    },
+                )
+
+                self._annotations[ann_id] = annotation
+                bounds = annotation.bounds()
+
+                rtree_id = self._next_rtree_id
+                self._next_rtree_id += 1
+                self._id_to_rtree[ann_id] = rtree_id
+                self._index.insert(rtree_id, bounds, obj=ann_id)
+                ids.append(ann_id)
+
+        if ids:
+            self._dirty = True
+            self.annotationsBatchAdded.emit(len(ids))
+            self.groupsChanged.emit()
+            self.annotationsChanged.emit()
+
+        return ids
+
+    @Slot(list)
+    def removeAnnotationsBatch(self, ann_ids: list[str]) -> None:
+        """Remove multiple annotations in a single batch.
+
+        Args:
+            ann_ids: List of annotation IDs to remove
+        """
+        removed = 0
+        with self._index_lock:
+            for ann_id in ann_ids:
+                if ann_id not in self._annotations:
+                    continue
+                annotation = self._annotations[ann_id]
+                bounds = annotation.bounds()
+                rtree_id = self._id_to_rtree.pop(ann_id, None)
+                if rtree_id is not None:
+                    self._index.delete(rtree_id, bounds)
+                del self._annotations[ann_id]
+                removed += 1
+
+        if removed:
+            self._dirty = True
+            self.groupsChanged.emit()
+            self.annotationsChanged.emit()
+
+    @Slot(str, result=int)
+    def removeAnnotationsByGroup(self, group: str) -> int:
+        """Remove all annotations in a group.
+
+        Args:
+            group: Group name
+
+        Returns:
+            Number of annotations removed
+        """
+        ids_to_remove = [
+            ann_id for ann_id, ann in self._annotations.items()
+            if ann.group == group
+        ]
+        self.removeAnnotationsBatch(ids_to_remove)
+        return len(ids_to_remove)
+
+    @Slot(str, result="QVariantList")
+    def getAnnotationsByGroup(self, group: str) -> list:
+        """Get all annotations in a group.
+
+        Args:
+            group: Group name
+
+        Returns:
+            List of annotation dicts
+        """
+        return [
+            self._annotation_to_dict(ann)
+            for ann in self._annotations.values()
+            if ann.group == group
+        ]
+
+    @Slot(result="QVariantList")
+    def getGroups(self) -> list[str]:
+        """Get list of unique group names."""
+        groups: set[str] = set()
+        for ann in self._annotations.values():
+            groups.add(ann.group)
+        return sorted(groups)
+
+    @Slot(str, result=int)
+    def getGroupCount(self, group: str) -> int:
+        """Get number of annotations in a group."""
+        return sum(1 for ann in self._annotations.values() if ann.group == group)
 
     @Slot(str)
     def save(self, path: str) -> None:

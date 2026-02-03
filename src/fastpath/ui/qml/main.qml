@@ -105,6 +105,33 @@ ApplicationWindow {
         }
 
         Menu {
+            title: qsTr("&Annotations")
+            enabled: SlideManager.isLoaded && !preprocessMode
+
+            Action {
+                text: qsTr("&Export Annotations...")
+                shortcut: "Ctrl+E"
+                enabled: SlideManager.isLoaded && AnnotationManager.count > 0
+                onTriggered: menuExportDialog.open()
+            }
+
+            Action {
+                text: qsTr("&Import Annotations...")
+                shortcut: "Ctrl+I"
+                enabled: SlideManager.isLoaded
+                onTriggered: menuImportDialog.open()
+            }
+
+            MenuSeparator {}
+
+            Action {
+                text: qsTr("&Clear All Annotations")
+                enabled: SlideManager.isLoaded && AnnotationManager.count > 0
+                onTriggered: menuClearConfirmDialog.open()
+            }
+        }
+
+        Menu {
             title: qsTr("&Help")
 
             Action {
@@ -163,6 +190,60 @@ ApplicationWindow {
 
             Item { Layout.fillHeight: true }
         }
+    }
+
+    // Annotation menu dialogs
+    FileDialog {
+        id: menuExportDialog
+        title: "Export Annotations"
+        nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "geojson"
+        onAccepted: {
+            let path = selectedFile.toString()
+            if (path.startsWith("file:///")) {
+                path = path.substring(8)
+            }
+            AnnotationManager.save(path)
+        }
+    }
+
+    FileDialog {
+        id: menuImportDialog
+        title: "Import Annotations"
+        nameFilters: ["GeoJSON Files (*.geojson)", "All Files (*)"]
+        fileMode: FileDialog.OpenFile
+        onAccepted: {
+            let path = selectedFile.toString()
+            if (path.startsWith("file:///")) {
+                path = path.substring(8)
+            }
+            AnnotationManager.load(path)
+        }
+    }
+
+    Dialog {
+        id: menuClearConfirmDialog
+        title: "Clear Annotations"
+        modal: true
+        anchors.centerIn: parent
+        width: 300
+        standardButtons: Dialog.Ok | Dialog.Cancel
+
+        background: Rectangle {
+            color: Theme.surface
+            radius: Theme.radiusLarge
+            border.color: Theme.border
+        }
+
+        Label {
+            text: "Remove all " + AnnotationManager.count + " annotations?"
+            color: Theme.text
+            wrapMode: Text.WordWrap
+            width: parent.width
+        }
+
+        onAccepted: AnnotationManager.clear()
     }
 
     // Main content
@@ -284,6 +365,14 @@ ApplicationWindow {
                 }
 
                 // Feature branches add new panels here as single lines
+                AnnotationPanel {
+                    Layout.fillWidth: true
+                    annotationsVisible: viewer.annotationsVisible
+                    onVisibilityToggled: (visible) => { viewer.annotationsVisible = visible }
+                    onExportRequested: (path) => { AnnotationManager.save(path) }
+                    onImportRequested: (path) => { AnnotationManager.load(path) }
+                    onClearRequested: AnnotationManager.clear()
+                }
 
                 Item { Layout.fillHeight: true }
             }
@@ -321,7 +410,11 @@ ApplicationWindow {
                     if (preprocessMode && Preprocess.isProcessing) {
                         return (Preprocess.progress * 100).toFixed(0) + "%"
                     } else if (SlideManager.isLoaded && !preprocessMode) {
-                        return "Level: " + viewer.currentLevel + " | Tiles: " + App.tileModel.rowCount()
+                        let info = "Level: " + viewer.currentLevel + " | Tiles: " + App.tileModel.rowCount()
+                        if (AnnotationManager.count > 0) {
+                            info += " | Annotations: " + AnnotationManager.count
+                        }
+                        return info
                     }
                     return ""
                 }

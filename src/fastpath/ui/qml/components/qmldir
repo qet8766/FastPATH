@@ -17,3 +17,6 @@ OverviewPanel 1.0 OverviewPanel.qml
 ViewControlsPanel 1.0 ViewControlsPanel.qml
 NavigationPanel 1.0 NavigationPanel.qml
 InteractionLayer 1.0 InteractionLayer.qml
+AnnotationTileLayer 1.0 AnnotationTileLayer.qml
+SelectedAnnotationOverlay 1.0 SelectedAnnotationOverlay.qml
+AnnotationPanel 1.0 AnnotationPanel.qml

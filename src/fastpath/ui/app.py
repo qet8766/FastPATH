@@ -16,7 +16,7 @@ from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_TH
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
 from fastpath.plugins.controller import PluginController
-from fastpath.ui.providers import TileImageProvider, ThumbnailProvider
+from fastpath.ui.providers import TileImageProvider, ThumbnailProvider, AnnotationTileImageProvider
 from fastpath.ui.models import TileModel, RecentFilesModel
 from fastpath.ui.navigator import SlideNavigator
 from fastpath.ui.settings import Settings
@@ -444,6 +444,7 @@ def run_app(args: list[str] | None = None) -> int:
     # Register image providers
     engine.addImageProvider("tiles", TileImageProvider(rust_scheduler))
     engine.addImageProvider("thumbnail", ThumbnailProvider(slide_manager))
+    engine.addImageProvider("annotations", AnnotationTileImageProvider(annotation_manager, slide_manager))
 
     # Expose objects to QML
     engine.rootContext().setContextProperty("App", controller)

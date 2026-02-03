@@ -13,6 +13,14 @@ Item {
     property real viewportHeight: height / scale
     property int currentLevel: SlideManager.getLevelForScale(scale)
 
+    // Annotation properties
+    property bool annotationsVisible: true
+    property string selectedAnnotationId: ""
+    property alias interactionMode: interactionLayer.mode
+
+    // Forward ROI signal from InteractionLayer
+    signal roiSelected(rect region)
+
     // Internal
     property real contentWidth: SlideManager.width
     property real contentHeight: SlideManager.height
@@ -61,6 +69,24 @@ Item {
                 anchors.fill: parent
                 scale: root.scale
                 z: 1
+            }
+
+            // Annotation tile layer (rasterized overlay)
+            AnnotationTileLayer {
+                id: annotationTileLayer
+                anchors.fill: parent
+                scale: root.scale
+                annotationsVisible: root.annotationsVisible
+                z: 1.5
+            }
+
+            // Selected annotation highlight overlay
+            SelectedAnnotationOverlay {
+                id: selectedAnnotationOverlay
+                anchors.fill: parent
+                slideScale: root.scale
+                selectedAnnotation: root.selectedAnnotationId !== "" ? AnnotationManager.getAnnotation(root.selectedAnnotationId) : null
+                z: 1.6
             }
 
             // Interaction overlay (mode-based: draw, roi, measure)
@@ -182,6 +208,13 @@ Item {
         }
     }
 
+    Connections {
+        target: interactionLayer
+        function onRoiSelected(region) {
+            root.roiSelected(region)
+        }
+    }
+
     // Public functions
     function updateViewport() {
         root.viewportX = flickable.contentX / root.scale
@@ -261,6 +294,10 @@ Item {
         flickable.contentX = slideX * root.scale - flickable.width / 2
         flickable.contentY = slideY * root.scale - flickable.height / 2
         updateViewport()
+    }
+
+    function selectAnnotation(annotationId) {
+        root.selectedAnnotationId = annotationId || ""
     }
 
     // Handle resize
