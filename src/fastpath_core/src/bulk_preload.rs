@@ -1,6 +1,6 @@
 //! Background preloader for L2 compressed tile cache.
 //!
-//! Reads JPEG tiles from disk and inserts them into L2 (compressed cache)
+//! Reads JPEG tiles from the packed tile store and inserts them into L2 (compressed cache)
 //! without decoding to RGB. Uses a dedicated 3-thread rayon pool to avoid
 //! competing with interactive viewport prefetch I/O.
 
@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use parking_lot::Mutex;
 
 use crate::cache::{CompressedTileCache, SlideTileCoord};
-use crate::decoder::read_jpeg_bytes;
+use crate::decoder::CompressedTileData;
 use crate::slide_pool::SlidePool;
 
 /// Background preloader that fills L2 cache with tiles from multiple slides.
@@ -47,7 +47,7 @@ impl BulkPreloader {
     /// Start background preloading of slides into L2.
     ///
     /// Cancels any previous run, then spawns a worker thread that iterates
-    /// slides in priority order, reading JPEG tiles from disk and inserting
+    /// slides in priority order, reading JPEG tiles from the packed store and inserting
     /// them into L2. No JPEG decode (no L1 insert) — tiles are decoded on
     /// demand when the user views them.
     ///
@@ -95,8 +95,10 @@ impl BulkPreloader {
                         }
                     };
 
+                    let pack = &entry.pack;
+
                     // Enumerate all tiles across all levels
-                    let mut tile_work: Vec<(SlideTileCoord, PathBuf)> = Vec::new();
+                    let mut tile_work: Vec<SlideTileCoord> = Vec::new();
                     let mut skipped = 0usize;
 
                     for level_info in &entry.metadata.levels {
@@ -115,10 +117,7 @@ impl BulkPreloader {
                                     continue;
                                 }
 
-                                let tile_path = entry
-                                    .resolver
-                                    .get_tile_path(level_info.level, col, row);
-                                tile_work.push((l2_coord, tile_path));
+                                tile_work.push(l2_coord);
                             }
                         }
                     }
@@ -137,13 +136,30 @@ impl BulkPreloader {
 
                     rayon_pool.install(|| {
                         use rayon::prelude::*;
-                        tile_work.par_iter().for_each(|(l2_coord, tile_path)| {
+                        tile_work.par_iter().for_each(|l2_coord| {
                             if cancelled_ref.load(Ordering::Acquire) {
                                 return;
                             }
 
-                            match read_jpeg_bytes(tile_path) {
-                                Ok(compressed) => {
+                            let tile_ref = match pack.tile_ref(
+                                l2_coord.level,
+                                l2_coord.col,
+                                l2_coord.row,
+                            ) {
+                                Some(tile_ref) => tile_ref,
+                                None => {
+                                    failed.fetch_add(1, Ordering::Relaxed);
+                                    return;
+                                }
+                            };
+
+                            match pack.read_tile_bytes(tile_ref) {
+                                Ok(bytes) => {
+                                    let compressed = CompressedTileData {
+                                        jpeg_bytes: bytes,
+                                        width: 0,
+                                        height: 0,
+                                    };
                                     l2_cache.insert(*l2_coord, compressed);
                                     loaded.fetch_add(1, Ordering::Relaxed);
                                 }

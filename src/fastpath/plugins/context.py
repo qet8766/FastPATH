@@ -6,8 +6,11 @@ Reads the pyramid metadata and tiles directly from the filesystem.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+import mmap
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -20,6 +23,11 @@ from fastpath.preprocess.backends import VIPSBackend, is_vips_available
 from .types import RegionOfInterest
 
 logger = logging.getLogger(__name__)
+
+_PACK_MAGIC = b"FPTIDX1\0"
+_PACK_HEADER = struct.Struct("<8sII")
+_PACK_LEVEL = struct.Struct("<IIIQ")
+_PACK_ENTRY = struct.Struct("<QII")
 
 try:
     import pyvips
@@ -60,6 +68,18 @@ class SlideContext:
 
         with open(metadata_file) as f:
             self._meta = json.load(f)
+
+        if self._meta.get("tile_format") != "pack_v1":
+            raise RuntimeError(
+                f"Unsupported tile_format: {self._meta.get('tile_format')}"
+            )
+
+        self._pack_levels: dict[int, tuple[int, int, int]] = {}
+        self._pack_index: bytes | None = None
+        self._pack_entries_base = 0
+        self._pack_file: io.BufferedReader | None = None
+        self._pack_mmap: mmap.mmap | None = None
+        self._load_pack()
 
         self._levels = self._build_levels()
 
@@ -116,6 +136,66 @@ class SlideContext:
             )
         return levels
 
+    def _load_pack(self) -> None:
+        idx_path = self._path / "tiles.idx"
+        pack_path = self._path / "tiles.pack"
+
+        if not idx_path.exists():
+            raise FileNotFoundError(f"No tiles.idx in {self._path}")
+        if not pack_path.exists():
+            raise FileNotFoundError(f"No tiles.pack in {self._path}")
+
+        data = idx_path.read_bytes()
+        if len(data) < _PACK_HEADER.size:
+            raise RuntimeError("tiles.idx is too small")
+
+        magic, version, level_count = _PACK_HEADER.unpack_from(data, 0)
+        if magic != _PACK_MAGIC:
+            raise RuntimeError("tiles.idx magic mismatch")
+        if version != 1:
+            raise RuntimeError(f"Unsupported tiles.idx version: {version}")
+        if level_count == 0:
+            raise RuntimeError("tiles.idx has no levels")
+
+        levels_offset = _PACK_HEADER.size
+        levels_size = level_count * _PACK_LEVEL.size
+        if len(data) < levels_offset + levels_size:
+            raise RuntimeError("tiles.idx missing level table")
+
+        entries_base = levels_offset + levels_size
+        entries_len = len(data) - entries_base
+
+        for i in range(level_count):
+            level, cols, rows, entry_offset = _PACK_LEVEL.unpack_from(
+                data, levels_offset + i * _PACK_LEVEL.size
+            )
+            entry_count = cols * rows
+            end = entry_offset + entry_count * _PACK_ENTRY.size
+            if end > entries_len:
+                raise RuntimeError(
+                    f"tiles.idx entry range out of bounds for level {level}"
+                )
+            self._pack_levels[level] = (cols, rows, entry_offset)
+
+        self._pack_index = data
+        self._pack_entries_base = entries_base
+        self._pack_file = open(pack_path, "rb")
+        self._pack_mmap = mmap.mmap(self._pack_file.fileno(), 0, access=mmap.ACCESS_READ)
+
+    def close_pack(self) -> None:
+        if self._pack_mmap is not None:
+            self._pack_mmap.close()
+            self._pack_mmap = None
+        if self._pack_file is not None:
+            self._pack_file.close()
+            self._pack_file = None
+
+    def close(self) -> None:
+        self.close_pack()
+
+    def __del__(self) -> None:
+        self.close_pack()
+
     def level_for_mpp(self, target_mpp: float) -> int:
         """Return the coarsest level where ``level_mpp <= target_mpp``.
 
@@ -158,26 +238,47 @@ class SlideContext:
     # Tile access
     # ------------------------------------------------------------------
 
-    def tile_path(self, level: int, col: int, row: int) -> Path | None:
-        """Return the filesystem path of a tile, or None if it doesn't exist."""
-        p = self._path / "tiles_files" / str(level) / f"{col}_{row}.jpg"
-        return p if p.exists() else None
+    def _tile_bytes(self, level: int, col: int, row: int) -> bytes | None:
+        info = self._pack_levels.get(level)
+        if info is None:
+            return None
+
+        cols, rows, entry_offset = info
+        if col < 0 or row < 0 or col >= cols or row >= rows:
+            return None
+
+        if self._pack_index is None or self._pack_mmap is None:
+            return None
+
+        idx = row * cols + col
+        entry_pos = self._pack_entries_base + entry_offset + idx * _PACK_ENTRY.size
+        if entry_pos + _PACK_ENTRY.size > len(self._pack_index):
+            return None
+
+        offset, length, _ = _PACK_ENTRY.unpack_from(self._pack_index, entry_pos)
+        if length == 0:
+            return None
+
+        if offset + length > len(self._pack_mmap):
+            return None
+
+        return self._pack_mmap[offset : offset + length]
 
     def get_tile(self, level: int, col: int, row: int) -> np.ndarray | None:
         """Read a single tile as an RGB numpy array.
 
         Returns None if the tile file doesn't exist.
         """
-        p = self.tile_path(level, col, row)
-        if p is None:
+        data = self._tile_bytes(level, col, row)
+        if data is None:
             return None
 
         if is_vips_available() and pyvips is not None:
-            vimg = pyvips.Image.new_from_file(str(p), access="sequential")
+            vimg = pyvips.Image.new_from_buffer(data, "", access="sequential")
             return VIPSBackend.to_numpy(vimg)
 
         if PILImage is not None:
-            pil_img = PILImage.open(p).convert("RGB")
+            pil_img = PILImage.open(io.BytesIO(data)).convert("RGB")
             return np.array(pil_img)
 
         raise RuntimeError("Neither pyvips nor PIL available for tile decoding")

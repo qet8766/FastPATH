@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -70,39 +71,65 @@ class TestCalculateLevelsFromDimensions:
 class TestPreprocessIntegration:
     """Integration tests for the full preprocessing pipeline.
 
-    Tests verify the dzsave format structure where:
-    - tiles_files/ contains the tile pyramid
+    Tests verify the packed format structure where:
+    - tiles.pack + tiles.idx contain the tile pyramid
     - Level 0 = lowest resolution (smallest)
     - Level N = highest resolution (largest)
     """
 
+    _PACK_HEADER = struct.Struct("<8sII")
+    _PACK_LEVEL = struct.Struct("<IIIQ")
+    _PACK_ENTRY = struct.Struct("<QII")
+
+    def _read_index(self, idx_path: Path):
+        data = idx_path.read_bytes()
+        magic, version, level_count = self._PACK_HEADER.unpack_from(data, 0)
+        assert magic == b"FPTIDX1\0"
+        assert version == 1
+        entries_base = self._PACK_HEADER.size + level_count * self._PACK_LEVEL.size
+        levels = {}
+        for i in range(level_count):
+            level, cols, rows, entry_offset = self._PACK_LEVEL.unpack_from(
+                data, self._PACK_HEADER.size + i * self._PACK_LEVEL.size
+            )
+            levels[level] = (cols, rows, entry_offset)
+        return data, entries_base, levels
+
     def test_mock_fastpath_structure(self, mock_fastpath_dir: Path):
-        """Verify mock fastpath directory has correct dzsave structure."""
+        """Verify mock fastpath directory has correct pack structure."""
         assert mock_fastpath_dir.exists()
         assert (mock_fastpath_dir / "metadata.json").exists()
         assert (mock_fastpath_dir / "thumbnail.jpg").exists()
-        # dzsave format uses tiles_files/ directory
-        assert (mock_fastpath_dir / "tiles_files" / "0").exists()
-        assert (mock_fastpath_dir / "tiles_files" / "1").exists()
-        assert (mock_fastpath_dir / "tiles_files" / "2").exists()
+        assert (mock_fastpath_dir / "tiles.pack").exists()
+        assert (mock_fastpath_dir / "tiles.idx").exists()
         assert (mock_fastpath_dir / "annotations" / "default.geojson").exists()
 
-        # Check metadata has dzsave format marker
+        # Check metadata has pack format marker
         with open(mock_fastpath_dir / "metadata.json") as f:
             metadata = json.load(f)
-        assert metadata.get("tile_format") == "dzsave"
+        assert metadata.get("tile_format") == "pack_v1"
 
     def test_highest_res_tiles_exist(self, mock_fastpath_dir: Path):
         """Level 2 (highest resolution) should have 4x4 tiles."""
-        level2 = mock_fastpath_dir / "tiles_files" / "2"
-        tiles = list(level2.glob("*.jpg"))
-        assert len(tiles) == 16
+        data, entries_base, levels = self._read_index(mock_fastpath_dir / "tiles.idx")
+        cols, rows, entry_offset = levels[2]
+        assert cols * rows == 16
+
+        entry_start = entries_base + entry_offset
+        entries = []
+        for i in range(cols * rows):
+            offset, length, _ = self._PACK_ENTRY.unpack_from(
+                data, entry_start + i * self._PACK_ENTRY.size
+            )
+            entries.append((offset, length))
+        assert all(length > 0 for _, length in entries)
 
     def test_pyramid_levels_increase(self, mock_fastpath_dir: Path):
         """Higher level numbers should have more tiles (larger resolution)."""
-        level0 = len(list((mock_fastpath_dir / "tiles_files" / "0").glob("*.jpg")))
-        level1 = len(list((mock_fastpath_dir / "tiles_files" / "1").glob("*.jpg")))
-        level2 = len(list((mock_fastpath_dir / "tiles_files" / "2").glob("*.jpg")))
+        _data, _entries_base, levels = self._read_index(mock_fastpath_dir / "tiles.idx")
+        level0 = levels[0][0] * levels[0][1]
+        level1 = levels[1][0] * levels[1][1]
+        level2 = levels[2][0] * levels[2][1]
 
         # Higher level numbers have more tiles
         assert level2 > level1 > level0

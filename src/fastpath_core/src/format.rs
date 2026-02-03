@@ -1,6 +1,6 @@
-//! Tile path resolution for .fastpath directories.
+//! Slide metadata for .fastpath directories.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -89,29 +89,6 @@ impl SlideMetadata {
     }
 }
 
-/// Resolves tile paths for a loaded slide.
-#[derive(Debug, Clone)]
-pub struct TilePathResolver {
-    fastpath_dir: PathBuf,
-}
-
-impl TilePathResolver {
-    /// Create a new resolver for a .fastpath directory.
-    pub fn new(fastpath_dir: PathBuf) -> Self {
-        Self { fastpath_dir }
-    }
-
-    /// Get the file path for a tile.
-    ///
-    /// Returns the expected path — actual file existence is checked at decode time.
-    pub fn get_tile_path(&self, level: u32, col: u32, row: u32) -> PathBuf {
-        self.fastpath_dir
-            .join("tiles_files")
-            .join(level.to_string())
-            .join(format!("{}_{}.jpg", col, row))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,35 +114,6 @@ mod tests {
     fn write_and_load(dir: &Path, json: &str) -> TileResult<SlideMetadata> {
         fs::write(dir.join("metadata.json"), json).unwrap();
         SlideMetadata::load(dir)
-    }
-
-    #[test]
-    fn test_dzsave_format_path() {
-        let temp = TempDir::new().unwrap();
-        let dir = temp.path();
-
-        fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
-        fs::write(dir.join("tiles_files/0/5_3.jpg"), b"fake").unwrap();
-
-        let resolver = TilePathResolver::new(dir.to_path_buf());
-
-        let path = resolver.get_tile_path(0, 5, 3);
-        assert!(path.ends_with("tiles_files/0/5_3.jpg"));
-    }
-
-    #[test]
-    fn test_missing_tile_returns_path() {
-        // get_tile_path now returns the path regardless of existence
-        // decode_tile() handles missing files gracefully
-        let temp = TempDir::new().unwrap();
-        let dir = temp.path();
-
-        fs::create_dir_all(dir.join("tiles_files/0")).unwrap();
-
-        let resolver = TilePathResolver::new(dir.to_path_buf());
-
-        let path = resolver.get_tile_path(0, 99, 99);
-        assert!(path.ends_with("tiles_files/0/99_99.jpg"));
     }
 
     #[test]

@@ -28,6 +28,15 @@ Item {
     // Forward ROI signal from InteractionLayer
     signal roiSelected(rect region)
 
+    // Dynamic zoom-out limit: can't zoom beyond the full slide fitting in the viewport
+    property real minScale: {
+        var sw = SlideManager.width
+        var sh = SlideManager.height
+        if (sw > 0 && sh > 0 && width > 0 && height > 0)
+            return Math.min(width / sw, height / sh)
+        return 0.01
+    }
+
     // Internal
     property real contentWidth: SlideManager.width
     property real contentHeight: SlideManager.height
@@ -166,7 +175,7 @@ Item {
             let slideY = contentY / root.scale
 
             // Apply zoom
-            let newScale = Math.max(Theme.minScale, Math.min(Theme.maxScale, root.scale * zoomFactor))
+            let newScale = Math.max(root.minScale, Math.min(Theme.maxScale, root.scale * zoomFactor))
             root.scale = newScale
 
             // Adjust content position to keep mouse over same slide position
@@ -184,12 +193,12 @@ Item {
     PinchHandler {
         id: pinchHandler
         target: null
-        minimumScale: Theme.minScale / root.scale
+        minimumScale: root.minScale / root.scale
         maximumScale: Theme.maxScale / root.scale
 
         onScaleChanged: {
             let newScale = root.scale * pinchHandler.activeScale
-            newScale = Math.max(Theme.minScale, Math.min(Theme.maxScale, newScale))
+            newScale = Math.max(root.minScale, Math.min(Theme.maxScale, newScale))
             root.scale = newScale
             updateViewport()
         }
@@ -307,7 +316,7 @@ Item {
         let slideX = centerX / root.scale
         let slideY = centerY / root.scale
 
-        newScale = Math.max(Theme.minScale, Math.min(Theme.maxScale, newScale))
+        newScale = Math.max(root.minScale, Math.min(Theme.maxScale, newScale))
         root.scale = newScale
 
         flickable.contentX = Math.max(0, slideX * newScale - flickable.width / 2)
@@ -323,7 +332,7 @@ Item {
         let scaleY = root.height / root.contentHeight
         let fitScale = Math.min(scaleX, scaleY) * 0.95
 
-        root.scale = Math.max(Theme.minScale, Math.min(Theme.maxScale, fitScale))
+        root.scale = Math.max(root.minScale, Math.min(Theme.maxScale, fitScale))
 
         // Center the content
         flickable.contentX = Math.max(0, (contentContainer.width - flickable.width) / 2)
@@ -342,7 +351,7 @@ Item {
     function setViewState(viewX: real, viewY: real, viewScale: real) {
         if (!SlideManager.isLoaded) return
 
-        let newScale = Math.max(Theme.minScale, Math.min(Theme.maxScale, viewScale))
+        let newScale = Math.max(root.minScale, Math.min(Theme.maxScale, viewScale))
         root.scale = newScale
 
         let maxX = Math.max(0, contentContainer.width - flickable.width)

@@ -8,6 +8,7 @@ ThemedGroupBox {
 
     // Viewer properties and functions
     required property real viewerScale
+    property real viewerMinScale: Theme.minScale
     signal fitRequested()
     signal resetRequested()
     signal zoomRequested(real newScale)
@@ -24,7 +25,7 @@ ThemedGroupBox {
 
         Slider {
             Layout.fillWidth: true
-            from: Math.log(Theme.minScale)
+            from: Math.log(viewerMinScale)
             to: Math.log(Theme.maxScale)
             value: Math.log(viewerScale)
             onMoved: zoomRequested(Math.exp(value))

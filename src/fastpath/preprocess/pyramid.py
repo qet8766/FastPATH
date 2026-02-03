@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -77,7 +78,7 @@ class VipsPyramidBuilder:
         - pyvips with OpenSlide support (libvips compiled with openslide)
 
     Output format:
-        - tiles_files/N/col_row.jpg (Deep Zoom structure)
+        - tiles.pack + tiles.idx (packed tile store)
         - Level 0 = lowest resolution, level N = highest resolution (native dzsave convention)
     """
 
@@ -118,6 +119,7 @@ class VipsPyramidBuilder:
         )
         self._run_dzsave(image, pyramid_dir, progress_callback)
         levels = self._calculate_levels_from_dimensions(dimensions[0], dimensions[1], self.tile_size)
+        self._pack_tiles(pyramid_dir, levels)
         self._write_metadata(
             pyramid_dir, slide_path, base_mpp, actual_mpp, actual_mag, dimensions, levels
         )
@@ -313,6 +315,62 @@ class VipsPyramidBuilder:
         )
         logger.debug("Tile pyramid generated")
 
+    def _pack_tiles(self, pyramid_dir: Path, levels: list[LevelInfo]) -> None:
+        """Pack dzsave tiles into tiles.pack/tiles.idx and remove the dzsave output."""
+        tiles_dir = pyramid_dir / "tiles_files"
+        if not tiles_dir.exists():
+            raise RuntimeError(f"Missing dzsave tiles at {tiles_dir}")
+
+        pack_path = pyramid_dir / "tiles.pack"
+        idx_path = pyramid_dir / "tiles.idx"
+
+        header_struct = struct.Struct("<8sII")
+        level_struct = struct.Struct("<IIIQ")
+        entry_struct = struct.Struct("<QII")
+        magic = b"FPTIDX1\0"
+        version = 1
+
+        with open(pack_path, "wb") as pack_file, open(idx_path, "wb") as idx_file:
+            idx_file.write(header_struct.pack(magic, version, len(levels)))
+
+            entry_offset = 0
+            for info in levels:
+                idx_file.write(
+                    level_struct.pack(
+                        info.level, info.cols, info.rows, entry_offset
+                    )
+                )
+                entry_offset += info.cols * info.rows * entry_struct.size
+
+            pack_offset = 0
+            for info in levels:
+                level_dir = tiles_dir / str(info.level)
+                if not level_dir.exists():
+                    raise RuntimeError(f"Missing level directory: {level_dir}")
+                for row in range(info.rows):
+                    for col in range(info.cols):
+                        tile_path = level_dir / f"{col}_{row}.jpg"
+                        data = None
+                        if tile_path.exists():
+                            data = tile_path.read_bytes()
+                        else:
+                            alt_path = level_dir / f"{col}_{row}.jpeg"
+                            if alt_path.exists():
+                                data = alt_path.read_bytes()
+
+                        if data is None:
+                            idx_file.write(entry_struct.pack(0, 0, 0))
+                            continue
+
+                        pack_file.write(data)
+                        idx_file.write(entry_struct.pack(pack_offset, len(data), 0))
+                        pack_offset += len(data)
+
+        shutil.rmtree(tiles_dir)
+        dzi_path = pyramid_dir / "tiles.dzi"
+        if dzi_path.exists():
+            dzi_path.unlink()
+
     def _write_metadata(
         self,
         pyramid_dir: Path,
@@ -345,6 +403,7 @@ class VipsPyramidBuilder:
             levels=levels,
             background_color=BACKGROUND_COLOR,
             preprocessed_at=datetime.now(timezone.utc).isoformat(),
+            tile_format="pack_v1",
         )
 
         with open(pyramid_dir / "metadata.json", "w") as f:

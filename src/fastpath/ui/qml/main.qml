@@ -322,12 +322,13 @@ ApplicationWindow {
                     anchors.centerIn: parent
                     spacing: Theme.spacingLarge
 
-                    Label {
-                        text: "FastPATH"
-                        font.pixelSize: 48
-                        font.bold: true
-                        color: Theme.textMuted
+                    Image {
+                        source: "file:///" + AssetsDir + "/logo.png"
+                        sourceSize.width: 400
+                        fillMode: Image.PreserveAspectFit
                         Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 400
+                        Layout.preferredHeight: 150
                     }
 
                     Label {
@@ -449,6 +450,7 @@ ApplicationWindow {
                 ViewControlsPanel {
                     Layout.fillWidth: true
                     viewerScale: viewer.scale
+                    viewerMinScale: viewer.minScale
                     onFitRequested: viewer.fitToWindow()
                     onResetRequested: viewer.resetView()
                     onZoomRequested: (newScale) => { viewer.scale = newScale }

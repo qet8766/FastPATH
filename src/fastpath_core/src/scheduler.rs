@@ -22,9 +22,9 @@ const EXTENDED_TILE_BUDGET: usize = 32;
 
 use crate::bulk_preload::BulkPreloader;
 use crate::cache::{CacheStats, CompressedTileCache, SlideTileCoord, TileCache, TileCoord, compute_slide_id};
-use crate::decoder::{decode_jpeg_bytes, read_jpeg_bytes, TileData};
+use crate::decoder::{decode_jpeg_bytes, CompressedTileData, TileData};
 use crate::error::{TileError, TileResult};
-use crate::format::TilePathResolver;
+use crate::pack::TilePack;
 use crate::prefetch::{PrefetchCalculator, PrefetchConfig, Viewport};
 use crate::slide_pool::{SlideEntry, SlidePool};
 
@@ -180,8 +180,8 @@ impl TileScheduler {
     }
 
     /// Log a tile error to stderr.
-    fn log_tile_error(phase: &str, coord: &TileCoord, path: &std::path::Path, error: &dyn std::fmt::Debug) {
-        eprintln!("[TILE ERROR] {phase}{coord}; path={path:?}: {error:?}");
+    fn log_tile_error(phase: &str, coord: &TileCoord, error: &dyn std::fmt::Debug) {
+        eprintln!("[TILE ERROR] {phase}{coord}: {error:?}");
     }
 
     /// Read, compress-cache (L2), decode, and insert a tile into L1.
@@ -192,15 +192,24 @@ impl TileScheduler {
     /// produce valid data and moka handles duplicate inserts safely. This avoids
     /// returning `None` to QML (which would cache a placeholder permanently).
     /// Background prefetch dedup is handled separately in `load_tile_for_prefetch()`.
-    fn load_tile_into_cache(&self, coord: &TileCoord, path: &std::path::Path) -> Option<TileData> {
+    fn load_tile_into_cache(&self, coord: &TileCoord, pack: &TilePack) -> Option<TileData> {
         let slide_id = self.active_slide_id.load(Ordering::Acquire);
         let t0 = if self.tile_timing { Some(Instant::now()) } else { None };
 
-        // Step 1: Read compressed JPEG from disk
-        let compressed = match read_jpeg_bytes(path) {
-            Ok(c) => c,
+        let tile_ref = match pack.tile_ref(coord.level, coord.col, coord.row) {
+            Some(tile_ref) => tile_ref,
+            None => return None,
+        };
+
+        // Step 1: Read compressed JPEG from pack
+        let compressed = match pack.read_tile_bytes(tile_ref) {
+            Ok(bytes) => CompressedTileData {
+                jpeg_bytes: bytes,
+                width: 0,
+                height: 0,
+            },
             Err(e) => {
-                Self::log_tile_error("", coord, path, &e);
+                Self::log_tile_error("", coord, &e);
                 return None;
             }
         };
@@ -222,7 +231,7 @@ impl TileScheduler {
                 if let Some(t) = t0 {
                     let total = t.elapsed();
                     eprintln!(
-                        "[TILE TIMING] {coord}  disk={:.2?} l2={:.2?} decode={:.2?} total={:.2?}",
+                        "[TILE TIMING] {coord}  pack={:.2?} l2={:.2?} decode={:.2?} total={:.2?}",
                         t_read.unwrap(),
                         t_l2.unwrap() - t_read.unwrap(),
                         t_decode.unwrap() - t_l2.unwrap(),
@@ -232,7 +241,7 @@ impl TileScheduler {
                 Some(tile)
             }
             Err(e) => {
-                Self::log_tile_error("decode ", coord, path, &e);
+                Self::log_tile_error("decode ", coord, &e);
                 None
             }
         }
@@ -251,7 +260,7 @@ impl TileScheduler {
     fn load_tile_for_prefetch(
         &self,
         coord: &TileCoord,
-        path: &std::path::Path,
+        pack: &TilePack,
         batch_generation: u64,
     ) -> Option<TileData> {
         // Capture slide_id + generation together at the start
@@ -267,7 +276,7 @@ impl TileScheduler {
             return Some(tile);
         }
 
-        // L2 hit — decode compressed JPEG and promote to L1, skip disk entirely
+        // L2 hit — decode compressed JPEG and promote to L1, skip pack entirely
         if slide_id != 0 {
             let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
             if let Some(compressed) = self.l2_cache.get(&l2_coord) {
@@ -283,7 +292,7 @@ impl TileScheduler {
                     self.cache.insert(*coord, tile.clone());
                     return Some(tile);
                 }
-                // Decode failed — fall through to disk path
+                // Decode failed — fall through to pack path
             }
         }
 
@@ -301,11 +310,23 @@ impl TileScheduler {
             }
         }
 
-        // Step 1: Read compressed JPEG from disk
-        let compressed = match read_jpeg_bytes(path) {
-            Ok(c) => c,
+        let tile_ref = match pack.tile_ref(coord.level, coord.col, coord.row) {
+            Some(tile_ref) => tile_ref,
+            None => {
+                self.clear_in_flight_for_generation(coord, batch_generation);
+                return None;
+            }
+        };
+
+        // Step 1: Read compressed JPEG from pack
+        let compressed = match pack.read_tile_bytes(tile_ref) {
+            Ok(bytes) => CompressedTileData {
+                jpeg_bytes: bytes,
+                width: 0,
+                height: 0,
+            },
             Err(e) => {
-                Self::log_tile_error("", coord, path, &e);
+                Self::log_tile_error("", coord, &e);
                 self.clear_in_flight_for_generation(coord, batch_generation);
                 return None;
             }
@@ -332,7 +353,7 @@ impl TileScheduler {
                 }
             }
             Err(e) => {
-                Self::log_tile_error("decode ", coord, path, &e);
+                Self::log_tile_error("decode ", coord, &e);
                 None
             }
         };
@@ -350,18 +371,7 @@ impl TileScheduler {
         }
     }
 
-    /// Resolve tile coordinates to filesystem paths.
-    fn collect_tile_paths(resolver: &TilePathResolver, coords: &[TileCoord]) -> Vec<(TileCoord, PathBuf)> {
-        coords
-            .iter()
-            .map(|coord| {
-                let path = resolver.get_tile_path(coord.level, coord.col, coord.row);
-                (*coord, path)
-            })
-            .collect()
-    }
-
-    /// Get a tile, loading from disk if not cached.
+    /// Get a tile, loading from pack if not cached.
     ///
     /// Returns the tile data or None if the tile doesn't exist.
     pub fn get_tile(&self, level: u32, col: u32, row: u32) -> Option<TileData> {
@@ -381,17 +391,17 @@ impl TileScheduler {
                     self.cache.insert(coord, tile.clone());
                     return Some(tile);
                 }
-                // Decode failed — fall through to disk
+                // Decode failed — fall through to pack
             }
         }
 
-        // Load from disk
-        let tile_path = {
+        // Load from pack
+        let entry = {
             let slide = self.slide.read();
-            slide.as_ref()?.resolver.get_tile_path(level, col, row)
+            Arc::clone(slide.as_ref()?)
         };
 
-        self.load_tile_into_cache(&coord, &tile_path)
+        self.load_tile_into_cache(&coord, &entry.pack)
     }
 
     /// Update viewport and trigger prefetching.
@@ -418,6 +428,7 @@ impl TileScheduler {
         let Some(state) = slide.as_ref() else {
             return;
         };
+        let state = Arc::clone(state);
 
         // Get visible tiles first (these are the priority)
         let visible_tiles = self.prefetch_calc.visible_tiles(&state.metadata, viewport);
@@ -459,15 +470,13 @@ impl TileScheduler {
             return;
         }
 
-        // Resolve paths while holding the lock
-        let tile_paths = Self::collect_tile_paths(&state.resolver, &tiles_to_load);
-
         // Drop the lock before parallel loading
         drop(slide);
+        let pack = &state.pack;
 
         // Load tiles in parallel using rayon (generation-checked)
-        tile_paths.par_iter().for_each(|(coord, path)| {
-            self.load_tile_for_prefetch(coord, path, batch_generation);
+        tiles_to_load.par_iter().for_each(|coord| {
+            self.load_tile_for_prefetch(coord, pack, batch_generation);
         });
     }
 
@@ -485,6 +494,7 @@ impl TileScheduler {
 
         let slide = self.slide.read();
         let Some(state) = slide.as_ref() else { return };
+        let state = Arc::clone(state);
 
         let num_levels = state.metadata.num_levels();
 
@@ -505,27 +515,26 @@ impl TileScheduler {
             }
         }
 
-        let tile_paths = Self::collect_tile_paths(&state.resolver, &all_coords);
-
         eprintln!(
             "[PREFETCH] Loading {} tiles from {} levels (max {} tiles/level): {:?}",
-            tile_paths.len(),
+            all_coords.len(),
             levels_to_prefetch.len(),
             MAX_TILES_PER_LEVEL,
             levels_to_prefetch
         );
 
         drop(slide);
+        let pack = &state.pack;
 
         let loaded = std::sync::atomic::AtomicUsize::new(0);
         let failed = std::sync::atomic::AtomicUsize::new(0);
 
-        tile_paths.par_iter().for_each(|(coord, path)| {
+        all_coords.par_iter().for_each(|coord| {
             // Skip tiles already in cache — only count fresh loads
             if self.cache.contains(coord) {
                 return;
             }
-            if self.load_tile_for_prefetch(coord, path, batch_generation).is_some() {
+            if self.load_tile_for_prefetch(coord, pack, batch_generation).is_some() {
                 loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -685,13 +694,17 @@ mod tests {
 
     #[test]
     fn test_in_flight_cleanup_on_prefetch_error() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+        let pack = crate::pack::TilePack::open(temp.path()).unwrap();
+
         let scheduler = TileScheduler::new(512, 64, 2);
         let coord = TileCoord::new(0, 0, 0);
         let gen = scheduler.generation.load(Ordering::Acquire);
-        // Decode will fail (nonexistent path), but in-flight must still be cleaned up
+        // Tile is missing in the pack, but in-flight must still be cleaned up
         let result = scheduler.load_tile_for_prefetch(
             &coord,
-            std::path::Path::new("/no/such/tile.jpg"),
+            &pack,
             gen,
         );
         assert!(result.is_none());
@@ -700,14 +713,18 @@ mod tests {
 
     #[test]
     fn test_foreground_bypasses_in_flight() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+        let pack = crate::pack::TilePack::open(temp.path()).unwrap();
+
         let scheduler = TileScheduler::new(512, 64, 2);
         let coord = TileCoord::new(0, 0, 0);
         // Simulate a prefetch thread holding the coord in-flight
         scheduler.in_flight.lock().insert(coord);
         // Foreground load_tile_into_cache should still attempt decode (not return None).
-        // Decode fails here (bad path), but the point is it tried instead of bailing.
-        let result = scheduler.load_tile_into_cache(&coord, std::path::Path::new("/no/such/tile.jpg"));
-        // Result is None due to decode error, NOT due to in-flight skip
+        // Tile is missing in the pack, but the point is it tried instead of bailing.
+        let result = scheduler.load_tile_into_cache(&coord, &pack);
+        // Result is None due to missing tile, NOT due to in-flight skip
         assert!(result.is_none());
         // The foreground path does not touch in_flight, so the entry remains
         assert!(scheduler.in_flight.lock().contains(&coord));
@@ -777,6 +794,7 @@ mod tests {
     fn test_stale_generation_skips_load() {
         let temp = TempDir::new().unwrap();
         create_test_fastpath(temp.path());
+        let pack = crate::pack::TilePack::open(temp.path()).unwrap();
 
         let scheduler = TileScheduler::new(512, 64, 2);
         scheduler.load(temp.path().to_str().unwrap()).unwrap();
@@ -786,7 +804,7 @@ mod tests {
         // Use stale generation (0) — should return None without touching cache
         let result = scheduler.load_tile_for_prefetch(
             &coord,
-            std::path::Path::new("/no/such/tile.jpg"),
+            &pack,
             0, // stale
         );
         assert!(result.is_none());
@@ -890,6 +908,10 @@ mod tests {
 
     #[test]
     fn test_prefetch_l2_hit() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+        let pack = crate::pack::TilePack::open(temp.path()).unwrap();
+
         let scheduler = TileScheduler::new(512, 64, 2);
         let slide_id: u64 = 42;
         scheduler.active_slide_id.store(slide_id, Ordering::Release);
@@ -903,7 +925,7 @@ mod tests {
         let coord = TileCoord::new(0, 0, 0);
         let tile = scheduler.load_tile_for_prefetch(
             &coord,
-            std::path::Path::new("/no/such/tile.jpg"), // disk path not needed — L2 hit
+            &pack, // pack not used — L2 hit
             gen,
         );
         assert!(tile.is_some());
@@ -917,6 +939,10 @@ mod tests {
 
     #[test]
     fn test_prefetch_l2_generation_guard() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+        let pack = crate::pack::TilePack::open(temp.path()).unwrap();
+
         let scheduler = TileScheduler::new(512, 64, 2);
         let slide_id: u64 = 42;
         scheduler.active_slide_id.store(slide_id, Ordering::Release);
@@ -933,7 +959,7 @@ mod tests {
         let coord = TileCoord::new(0, 0, 0);
         let tile = scheduler.load_tile_for_prefetch(
             &coord,
-            std::path::Path::new("/no/such/tile.jpg"),
+            &pack,
             stale_gen,
         );
         // Should return None — generation mismatch before L2 decode
@@ -996,8 +1022,8 @@ mod tests {
         scheduler.l2_cache.insert(l2_coord, corrupted);
 
 
-        // get_tile should fail L2 decode, fall through to disk.
-        // Disk will also fail (no tile file), so result is None.
+        // get_tile should fail L2 decode, fall through to pack.
+        // Pack will also fail (missing tile), so result is None.
         let tile = scheduler.get_tile(0, 0, 0);
         assert!(tile.is_none());
     }

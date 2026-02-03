@@ -96,17 +96,6 @@ class TestSlideManager:
         tiles_small = loaded_slide_manager.getVisibleTiles(0, 0, 512, 512, 1.0)
         assert len(tiles_small) <= 4  # At most 2x2 tiles
 
-    def test_get_tile_path(self, loaded_slide_manager):
-        """Should return correct tile path."""
-        # Existing tile at level 2 (highest resolution, 4x4 grid)
-        path = loaded_slide_manager.getTilePath(2, 0, 0)
-        assert path != ""
-        assert Path(path).exists()
-
-        # Non-existing tile (out of bounds for level 2)
-        path = loaded_slide_manager.getTilePath(2, 100, 100)
-        assert path == ""
-
     def test_get_tile_position(self, loaded_slide_manager):
         """Should return correct tile position in slide coordinates."""
         # Level 0 (ds=4): each tile covers 512*4=2048 pixels

@@ -639,6 +639,8 @@ def run_app(args: list[str] | None = None) -> int:
     engine.rootContext().setContextProperty("Navigator", controller.navigator)
     engine.rootContext().setContextProperty("CacheStats", cache_stats_provider)
     engine.rootContext().setContextProperty("IsDebugBuild", is_debug_build())
+    assets_dir = str(Path(__file__).parent.parent.parent.parent / "assets")
+    engine.rootContext().setContextProperty("AssetsDir", assets_dir)
 
     # Load QML
     qml_dir = Path(__file__).parent / "qml"

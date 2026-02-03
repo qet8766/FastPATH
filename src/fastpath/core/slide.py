@@ -55,6 +55,13 @@ class SlideManager(QObject):
             with open(metadata_path) as f:
                 metadata = json.load(f)
 
+            if metadata.get("tile_format") != "pack_v1":
+                logger.error(
+                    "Unsupported tile_format in metadata: %s",
+                    metadata.get("tile_format"),
+                )
+                return False
+
             # Parse levels BEFORE setting state to ensure clean failure
             levels = [
                 LevelInfo(
@@ -238,54 +245,6 @@ class SlideManager(QObject):
             if info.level == level:
                 return info
         return None
-
-    def _get_tile_path_internal(self, level: int, col: int, row: int) -> Path | None:
-        """Get the file path for a tile.
-
-        Args:
-            level: Pyramid level number
-            col: Column index
-            row: Row index
-
-        Returns:
-            Path object if tile exists, None otherwise
-        """
-        if not self._fastpath_dir:
-            return None
-
-        tile_path = self._fastpath_dir / "tiles_files" / str(level) / f"{col}_{row}.jpg"
-
-        if tile_path.exists():
-            return tile_path
-        return None
-
-    @Slot(int, int, int, result=str)
-    def getTilePath(self, level: int, col: int, row: int) -> str:
-        """Get the file path for a tile.
-
-        Args:
-            level: Pyramid level number
-            col: Column index (0-based)
-            row: Row index (0-based)
-
-        Returns:
-            File path string, or empty string if tile doesn't exist or coords invalid.
-        """
-        # Bounds validation
-        level_info = self._get_level_info_internal(level)
-        if level_info is None:
-            logger.debug("Invalid level %d", level)
-            return ""
-
-        if col < 0 or col >= level_info.cols:
-            logger.debug("Invalid col %d for level %d (valid: 0-%d)", col, level, level_info.cols - 1)
-            return ""
-        if row < 0 or row >= level_info.rows:
-            logger.debug("Invalid row %d for level %d (valid: 0-%d)", row, level, level_info.rows - 1)
-            return ""
-
-        tile_path = self._get_tile_path_internal(level, col, row)
-        return str(tile_path) if tile_path else ""
 
     @Slot(result=str)
     def getThumbnailPath(self) -> str:

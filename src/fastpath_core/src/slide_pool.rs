@@ -1,6 +1,6 @@
 //! Metadata pool for .fastpath directories.
 //!
-//! Caches `SlideEntry` (metadata + path resolver) by slide_id so that
+//! Caches `SlideEntry` (metadata + pack index) by slide_id so that
 //! revisiting a slide with a warm L2 cache skips re-parsing metadata.json.
 
 use std::collections::HashMap;
@@ -10,12 +10,13 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::error::TileResult;
-use crate::format::{SlideMetadata, TilePathResolver};
+use crate::format::SlideMetadata;
+use crate::pack::TilePack;
 
-/// Cached slide state: metadata + tile path resolver.
+/// Cached slide state: metadata + tile pack index.
 pub struct SlideEntry {
     pub metadata: SlideMetadata,
-    pub resolver: TilePathResolver,
+    pub pack: TilePack,
 }
 
 /// Pool of loaded slide metadata, keyed by slide_id hash.
@@ -42,8 +43,8 @@ impl SlidePool {
 
         // Slow path: load from disk
         let metadata = SlideMetadata::load(fastpath_dir)?;
-        let resolver = TilePathResolver::new(fastpath_dir.to_path_buf());
-        let entry = Arc::new(SlideEntry { metadata, resolver });
+        let pack = TilePack::open(fastpath_dir)?;
+        let entry = Arc::new(SlideEntry { metadata, pack });
 
         self.entries.write().insert(slide_id, Arc::clone(&entry));
         Ok(entry)

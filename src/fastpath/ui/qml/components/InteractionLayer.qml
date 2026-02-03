@@ -63,6 +63,7 @@ Item {
         id: roiMouseArea
         anchors.fill: parent
         enabled: root.mode === "roi"
+        preventStealing: true
         cursorShape: root.mode === "roi" ? Qt.CrossCursor : Qt.ArrowCursor
         hoverEnabled: false
 
@@ -122,6 +123,7 @@ Item {
         id: drawMouseArea
         anchors.fill: parent
         enabled: root.mode === "draw"
+        preventStealing: true
         cursorShape: root.mode === "draw" ? Qt.CrossCursor : Qt.ArrowCursor
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -296,6 +298,7 @@ Item {
         id: measureMouseArea
         anchors.fill: parent
         enabled: root.mode === "measure"
+        preventStealing: true
         cursorShape: root.mode === "measure" ? Qt.CrossCursor : Qt.ArrowCursor
         hoverEnabled: true
 

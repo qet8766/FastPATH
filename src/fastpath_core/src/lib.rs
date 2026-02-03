@@ -11,6 +11,7 @@ mod cache;
 mod decoder;
 mod error;
 mod format;
+mod pack;
 mod prefetch;
 mod scheduler;
 mod slide_pool;
