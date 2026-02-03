@@ -11,8 +11,6 @@ Rectangle {
     property string currentLabel: ""
 
     signal toolChanged(string tool)
-    signal colorChanged(string color)
-    signal drawingFinished(string toolType, var coordinates)
 
     color: Theme.surface
     radius: Theme.radiusNormal
@@ -112,7 +110,6 @@ Rectangle {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root.currentColor = modelData
-                            root.colorChanged(modelData)
                         }
                     }
                 }

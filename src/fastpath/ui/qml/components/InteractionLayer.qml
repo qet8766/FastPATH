@@ -358,8 +358,12 @@ Item {
         color: Theme.overlayBackground
         border.color: Theme.border
         border.width: 1
-        x: (root._measureStart.x + root._measureEnd.x) / 2 + 8
-        y: (root._measureStart.y + root._measureEnd.y) / 2 + 8
+        x: root._measureStart !== null && root._measureEnd !== null
+           ? (root._measureStart.x + root._measureEnd.x) / 2 + 8
+           : 0
+        y: root._measureStart !== null && root._measureEnd !== null
+           ? (root._measureStart.y + root._measureEnd.y) / 2 + 8
+           : 0
 
         property real _distanceSlide: {
             if (root._measureStart === null || root._measureEnd === null) return 0
