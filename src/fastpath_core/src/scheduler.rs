@@ -20,11 +20,13 @@ const MAX_VISIBLE_TILES: usize = 256;
 /// the visible area, covering ~32 tiles for a typical viewport perimeter.
 const EXTENDED_TILE_BUDGET: usize = 32;
 
+use crate::bulk_preload::BulkPreloader;
 use crate::cache::{CacheStats, CompressedTileCache, SlideTileCoord, TileCache, TileCoord, compute_slide_id};
 use crate::decoder::{decode_jpeg_bytes, read_jpeg_bytes, TileData};
 use crate::error::{TileError, TileResult};
-use crate::format::{SlideMetadata, TilePathResolver};
+use crate::format::TilePathResolver;
 use crate::prefetch::{PrefetchCalculator, PrefetchConfig, Viewport};
+use crate::slide_pool::{SlideEntry, SlidePool};
 
 /// Combined L1 + L2 cache statistics.
 #[derive(Debug, Clone, Default)]
@@ -38,20 +40,16 @@ fn tile_timing_enabled() -> bool {
     std::env::var("FASTPATH_TILE_TIMING").is_ok_and(|v| v == "1" || v == "true")
 }
 
-/// Internal slide state.
-struct SlideState {
-    metadata: SlideMetadata,
-    resolver: TilePathResolver,
-}
-
 /// High-performance tile scheduler with caching and prefetching.
 pub struct TileScheduler {
     /// L1 tile cache (decoded RGB).
     cache: Arc<TileCache>,
     /// L2 compressed tile cache (JPEG bytes, persists across slide switches).
     l2_cache: Arc<CompressedTileCache>,
-    /// Currently loaded slide state.
-    slide: RwLock<Option<SlideState>>,
+    /// Currently loaded slide state (Arc shared with pool).
+    slide: RwLock<Option<Arc<SlideEntry>>>,
+    /// Metadata pool — caches SlideEntry across slide switches.
+    pool: Arc<SlidePool>,
     /// Prefetch calculator.
     prefetch_calc: PrefetchCalculator,
     /// Tiles currently being decoded — prevents duplicate work across rayon threads.
@@ -60,6 +58,8 @@ pub struct TileScheduler {
     generation: AtomicU64,
     /// Hash of the current slide path (0 = no slide loaded).
     active_slide_id: AtomicU64,
+    /// Background preloader for filling L2 with tiles from nearby slides.
+    bulk_preloader: BulkPreloader,
     /// Whether per-tile timing is enabled (cached from FASTPATH_TILE_TIMING env var).
     tile_timing: bool,
 }
@@ -81,14 +81,22 @@ impl TileScheduler {
         };
         let prefetch_calc = PrefetchCalculator::new(prefetch_config);
 
+        let pool = Arc::new(SlidePool::new());
+        let bulk_preloader = BulkPreloader::new(
+            Arc::clone(&l2_cache),
+            Arc::clone(&pool),
+        );
+
         Self {
             cache,
             l2_cache,
             slide: RwLock::new(None),
+            pool,
             prefetch_calc,
             in_flight: Mutex::new(HashSet::new()),
             generation: AtomicU64::new(0),
             active_slide_id: AtomicU64::new(0),
+            bulk_preloader,
             tile_timing: tile_timing_enabled(),
         }
     }
@@ -109,8 +117,7 @@ impl TileScheduler {
         let canonical = path_buf.canonicalize().map_err(TileError::Io)?;
         let slide_id = compute_slide_id(&canonical.to_string_lossy().to_lowercase());
 
-        let metadata = SlideMetadata::load(&path_buf)?;
-        let resolver = TilePathResolver::new(path_buf)?;
+        let entry = self.pool.load_or_get(slide_id, &path_buf)?;
 
         // Invalidate in-flight prefetch work before clearing cache.
         // Bump generation first so workers see the change before the cache is cleared,
@@ -121,7 +128,7 @@ impl TileScheduler {
         // L2 is NOT cleared — persists across slide switches
 
         let mut slide = self.slide.write();
-        *slide = Some(SlideState { metadata, resolver });
+        *slide = Some(entry);
 
         self.active_slide_id.store(slide_id, Ordering::Release);
         Ok(())
@@ -606,6 +613,36 @@ impl TileScheduler {
                 .map(|l| (l.downsample, l.cols, l.rows))
         })
     }
+
+    /// Start background preloading of slides into L2.
+    ///
+    /// `slide_paths` should be in priority order (current slide first,
+    /// then alternating outward). Each path is canonicalized and hashed
+    /// to compute a slide_id for L2 keying.
+    pub fn start_bulk_preload(&self, slide_paths: Vec<String>) {
+        let entries: Vec<(u64, PathBuf)> = slide_paths
+            .into_iter()
+            .filter_map(|p| {
+                let path = PathBuf::from(&p);
+                let canonical = path.canonicalize().ok()?;
+                let slide_id =
+                    compute_slide_id(&canonical.to_string_lossy().to_lowercase());
+                Some((slide_id, path))
+            })
+            .collect();
+
+        self.bulk_preloader.start(entries);
+    }
+
+    /// Cancel any running bulk preload.
+    pub fn cancel_bulk_preload(&self) {
+        self.bulk_preloader.cancel();
+    }
+
+    /// Whether a bulk preload is currently running.
+    pub fn is_bulk_preloading(&self) -> bool {
+        self.bulk_preloader.is_running()
+    }
 }
 
 #[cfg(test)]
@@ -1069,5 +1106,48 @@ mod tests {
         // Disk will also fail (no tile file), so result is None.
         let tile = scheduler.get_tile(0, 0, 0);
         assert!(tile.is_none());
+    }
+
+    // --- SlidePool integration tests ---
+
+    #[test]
+    fn test_load_reuses_pool_on_revisit() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        scheduler.close();
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        // Pool should have exactly one entry (same slide reused)
+        assert_eq!(scheduler.pool.len(), 1);
+    }
+
+    #[test]
+    fn test_close_preserves_pool_entry() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        scheduler.close();
+
+        // Pool entry survives close()
+        assert_eq!(scheduler.pool.len(), 1);
+    }
+
+    #[test]
+    fn test_load_different_slides_grows_pool() {
+        let temp_a = TempDir::new().unwrap();
+        let temp_b = TempDir::new().unwrap();
+        create_test_fastpath(temp_a.path());
+        create_test_fastpath(temp_b.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp_a.path().to_str().unwrap()).unwrap();
+        scheduler.load(temp_b.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(scheduler.pool.len(), 2);
     }
 }

@@ -6,12 +6,14 @@
 //! - Viewport-based prefetching with velocity prediction
 //! - Fast JPEG decoding
 
+mod bulk_preload;
 mod cache;
 mod decoder;
 mod error;
 mod format;
 mod prefetch;
 mod scheduler;
+mod slide_pool;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -238,6 +240,26 @@ impl RustTileScheduler {
     ///     List of (level, col, row) tuples that are in cache
     fn filter_cached_tiles(&self, tiles: Vec<(u32, u32, u32)>) -> Vec<(u32, u32, u32)> {
         self.inner.filter_cached_tiles(&tiles)
+    }
+
+    /// Start background preloading of directory slides into L2 cache.
+    ///
+    /// Args:
+    ///     slide_paths: List of .fastpath directory paths in priority order
+    ///         (current slide first, then alternating neighbors)
+    fn start_bulk_preload(&self, slide_paths: Vec<String>) {
+        self.inner.start_bulk_preload(slide_paths);
+    }
+
+    /// Cancel any running bulk preload operation.
+    fn cancel_bulk_preload(&self) {
+        self.inner.cancel_bulk_preload();
+    }
+
+    /// Whether a bulk preload is currently running.
+    #[getter]
+    fn is_bulk_preloading(&self) -> bool {
+        self.inner.is_bulk_preloading()
     }
 }
 

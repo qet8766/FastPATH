@@ -89,3 +89,7 @@ class SlideNavigator(QObject):
             self.currentIndexChanged.emit()
             return str(self._slides[self._current_index])
         return ""
+
+    def get_slide_paths(self) -> list[str]:
+        """Return all slide paths in the directory as strings."""
+        return [str(p) for p in self._slides]

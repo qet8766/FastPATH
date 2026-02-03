@@ -259,6 +259,7 @@ class AppController(QObject):
                 str(resolved.parent)
             ).toString()
             self._navigator.scanDirectory(str(resolved))
+            self._start_bulk_preload()
             return True
 
         except Exception as e:
@@ -272,6 +273,7 @@ class AppController(QObject):
     def closeSlide(self) -> None:
         """Close the current slide."""
         self._slide_manager.close()
+        self._rust_scheduler.cancel_bulk_preload()
         self._rust_scheduler.close()
         self._plugin_manager.clear_slide()
         self._current_path = ""
@@ -394,6 +396,23 @@ class AppController(QObject):
         """Open the previous slide in the directory."""
         path = self._navigator.previousSlide()
         return self.openSlide(path) if path else False
+
+    def _start_bulk_preload(self) -> None:
+        """Start background preloading of nearby slides into L2 cache."""
+        slides = self._navigator.get_slide_paths()
+        idx = self._navigator.currentIndex
+        if len(slides) <= 1:
+            return
+
+        # Priority order: current slide first, then alternating outward
+        ordered: list[str] = [slides[idx]]
+        for delta in range(1, len(slides)):
+            if idx + delta < len(slides):
+                ordered.append(slides[idx + delta])
+            if idx - delta >= 0:
+                ordered.append(slides[idx - delta])
+
+        self._rust_scheduler.start_bulk_preload(ordered)
 
     @Slot(float, float, float, float, float)
     def updateViewport(
