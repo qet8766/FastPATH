@@ -115,7 +115,8 @@ impl TileCache {
         }
     }
 
-    /// Check if cache is empty.
+    /// Check if cache is empty (used in tests).
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.entry_count() == 0
     }

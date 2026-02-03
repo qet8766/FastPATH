@@ -38,39 +38,39 @@ impl SlideMetadata {
     /// Validate metadata fields and sort levels by level number.
     fn validate(&mut self) -> TileResult<()> {
         if self.dimensions.0 == 0 || self.dimensions.1 == 0 {
-            return Err(TileError::ValidationError(
+            return Err(TileError::Validation(
                 "dimensions must be positive".into(),
             ));
         }
         if self.tile_size == 0 {
-            return Err(TileError::ValidationError(
+            return Err(TileError::Validation(
                 "tile_size must be positive".into(),
             ));
         }
         if self.levels.is_empty() {
-            return Err(TileError::ValidationError(
+            return Err(TileError::Validation(
                 "levels must not be empty".into(),
             ));
         }
         self.levels.sort_by_key(|l| l.level);
         for (i, li) in self.levels.iter().enumerate() {
             if li.downsample == 0 {
-                return Err(TileError::ValidationError(
+                return Err(TileError::Validation(
                     format!("level {}: downsample must be positive", li.level),
                 ));
             }
             if li.cols == 0 {
-                return Err(TileError::ValidationError(
+                return Err(TileError::Validation(
                     format!("level {}: cols must be positive", li.level),
                 ));
             }
             if li.rows == 0 {
-                return Err(TileError::ValidationError(
+                return Err(TileError::Validation(
                     format!("level {}: rows must be positive", li.level),
                 ));
             }
             if i > 0 && li.level == self.levels[i - 1].level {
-                return Err(TileError::ValidationError(
+                return Err(TileError::Validation(
                     format!("duplicate level number: {}", li.level),
                 ));
             }

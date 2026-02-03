@@ -74,7 +74,7 @@ impl TileScheduler {
         let path = PathBuf::from(path);
 
         if !path.exists() {
-            return Err(TileError::IoError(std::io::Error::new(
+            return Err(TileError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Path does not exist: {}", path.display()),
             )));
@@ -139,10 +139,13 @@ impl TileScheduler {
 
     /// Decode a tile from disk and insert it into the cache.
     ///
-    /// Checks the cache first to guard against races (another thread may have
-    /// loaded the same tile concurrently). Returns the tile data on success.
+    /// Called only from foreground `get_tile()` — does NOT use in-flight dedup.
+    /// If a prefetch thread is concurrently decoding the same tile, both will
+    /// produce valid data and moka handles duplicate inserts safely. This avoids
+    /// returning `None` to QML (which would cache a placeholder permanently).
+    /// Background prefetch dedup is handled separately in `load_tile_for_prefetch()`.
     fn load_tile_into_cache(&self, coord: &TileCoord, path: &std::path::Path) -> Option<TileData> {
-        // Race guard — another thread might have loaded this tile already
+        // Fast path — tile already cached
         if let Some(tile) = self.cache.get(coord) {
             return Some(tile);
         }
@@ -159,6 +162,74 @@ impl TileScheduler {
                 );
                 None
             }
+        }
+    }
+
+    /// Decode a tile for prefetch, respecting generation to discard stale work.
+    ///
+    /// Three generation checks prevent inserting tiles from an old slide:
+    /// 1. Before claiming in-flight — quick exit without locking
+    /// 2. After claiming — catches races where load() ran between check #1 and lock
+    /// 3. Before cache insert — the critical guard after the ~5-10ms decode
+    fn load_tile_for_prefetch(
+        &self,
+        coord: &TileCoord,
+        path: &std::path::Path,
+        batch_generation: u64,
+    ) -> Option<TileData> {
+        // Check 1: quick exit before touching the in-flight set
+        if self.generation.load(Ordering::Acquire) != batch_generation {
+            return None;
+        }
+
+        // Fast path — tile already cached
+        if let Some(tile) = self.cache.get(coord) {
+            return Some(tile);
+        }
+
+        // Claim this coord in the in-flight set
+        {
+            let mut flight = self.in_flight.lock();
+
+            // Check 2: generation may have changed while waiting for lock
+            if self.generation.load(Ordering::Acquire) != batch_generation {
+                return None;
+            }
+
+            if !flight.insert(*coord) {
+                return None;
+            }
+        }
+
+        let result = match decode_tile(path) {
+            Ok(tile) => {
+                // Check 3: generation may have changed during decode
+                if self.generation.load(Ordering::Acquire) != batch_generation {
+                    None
+                } else {
+                    self.cache.insert(*coord, tile.clone());
+                    Some(tile)
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    coord.level, coord.col, coord.row, path, e
+                );
+                None
+            }
+        };
+
+        self.clear_in_flight_for_generation(coord, batch_generation);
+
+        result
+    }
+
+    /// Remove an in-flight coord only if the generation still matches.
+    /// Avoids clearing new-generation in-flight markers from stale prefetch threads.
+    fn clear_in_flight_for_generation(&self, coord: &TileCoord, batch_generation: u64) {
+        if self.generation.load(Ordering::Acquire) == batch_generation {
+            self.in_flight.lock().remove(coord);
         }
     }
 
@@ -197,6 +268,7 @@ impl TileScheduler {
     }
 
     /// Update viewport and trigger prefetching.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_viewport(
         &self,
         x: f64,
@@ -213,6 +285,8 @@ impl TileScheduler {
 
     /// Prefetch tiles for a viewport.
     fn prefetch_for_viewport(&self, viewport: &Viewport) {
+        let batch_generation = self.generation.load(Ordering::Acquire);
+
         let slide = self.slide.read();
         let Some(state) = slide.as_ref() else {
             return;
@@ -264,9 +338,9 @@ impl TileScheduler {
         // Drop the lock before parallel loading
         drop(slide);
 
-        // Load tiles in parallel using rayon
+        // Load tiles in parallel using rayon (generation-checked)
         tile_paths.par_iter().for_each(|(coord, path)| {
-            self.load_tile_into_cache(coord, path);
+            self.load_tile_for_prefetch(coord, path, batch_generation);
         });
     }
 
@@ -279,6 +353,8 @@ impl TileScheduler {
         // (64 × ~30 KB JPEG) while guaranteeing tiles are ready for any
         // initial zoom level the user might land on.
         const MAX_TILES_PER_LEVEL: u32 = 64;
+
+        let batch_generation = self.generation.load(Ordering::Acquire);
 
         let slide = self.slide.read();
         let Some(state) = slide.as_ref() else { return };
@@ -328,7 +404,7 @@ impl TileScheduler {
             if self.cache.contains(coord) {
                 return;
             }
-            if self.load_tile_into_cache(coord, path).is_some() {
+            if self.load_tile_for_prefetch(coord, path, batch_generation).is_some() {
                 loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -461,5 +537,116 @@ mod tests {
         let stats = scheduler.cache_stats();
         assert_eq!(stats.hits, 0);
         assert_eq!(stats.misses, 0);
+    }
+
+    #[test]
+    fn test_in_flight_cleanup_on_prefetch_error() {
+        let scheduler = TileScheduler::new(512, 2);
+        let coord = TileCoord::new(0, 0, 0);
+        let gen = scheduler.generation.load(Ordering::Acquire);
+        // Decode will fail (nonexistent path), but in-flight must still be cleaned up
+        let result = scheduler.load_tile_for_prefetch(
+            &coord,
+            std::path::Path::new("/no/such/tile.jpg"),
+            gen,
+        );
+        assert!(result.is_none());
+        assert!(scheduler.in_flight.lock().is_empty());
+    }
+
+    #[test]
+    fn test_foreground_bypasses_in_flight() {
+        let scheduler = TileScheduler::new(512, 2);
+        let coord = TileCoord::new(0, 0, 0);
+        // Simulate a prefetch thread holding the coord in-flight
+        scheduler.in_flight.lock().insert(coord);
+        // Foreground load_tile_into_cache should still attempt decode (not return None).
+        // Decode fails here (bad path), but the point is it tried instead of bailing.
+        let result = scheduler.load_tile_into_cache(&coord, std::path::Path::new("/no/such/tile.jpg"));
+        // Result is None due to decode error, NOT due to in-flight skip
+        assert!(result.is_none());
+        // The foreground path does not touch in_flight, so the entry remains
+        assert!(scheduler.in_flight.lock().contains(&coord));
+    }
+
+    #[test]
+    fn test_generation_increments() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 2);
+        assert_eq!(scheduler.generation.load(Ordering::Acquire), 0);
+
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        assert_eq!(scheduler.generation.load(Ordering::Acquire), 1);
+
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        assert_eq!(scheduler.generation.load(Ordering::Acquire), 2);
+
+        scheduler.close();
+        assert_eq!(scheduler.generation.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn test_in_flight_cleanup_respects_generation() {
+        let scheduler = TileScheduler::new(512, 2);
+        let coord = TileCoord::new(0, 0, 0);
+
+        // Stale generation should not remove a new-generation in-flight marker.
+        let old_gen = scheduler.generation.load(Ordering::Acquire);
+        scheduler.generation.fetch_add(1, Ordering::Release);
+        scheduler.in_flight.lock().insert(coord);
+        scheduler.clear_in_flight_for_generation(&coord, old_gen);
+        assert!(scheduler.in_flight.lock().contains(&coord));
+
+        // Current generation should remove.
+        let current_gen = scheduler.generation.load(Ordering::Acquire);
+        scheduler.clear_in_flight_for_generation(&coord, current_gen);
+        assert!(scheduler.in_flight.lock().is_empty());
+    }
+
+    #[test]
+    fn test_in_flight_cleared_on_load() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 2);
+        // Manually insert a coord into in-flight
+        scheduler.in_flight.lock().insert(TileCoord::new(0, 99, 99));
+        assert!(!scheduler.in_flight.lock().is_empty());
+
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        assert!(scheduler.in_flight.lock().is_empty());
+    }
+
+    #[test]
+    fn test_in_flight_cleared_on_close() {
+        let scheduler = TileScheduler::new(512, 2);
+        scheduler.in_flight.lock().insert(TileCoord::new(0, 99, 99));
+        assert!(!scheduler.in_flight.lock().is_empty());
+
+        scheduler.close();
+        assert!(scheduler.in_flight.lock().is_empty());
+    }
+
+    #[test]
+    fn test_stale_generation_skips_load() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        // generation is now 1
+
+        let coord = TileCoord::new(0, 0, 0);
+        // Use stale generation (0) — should return None without touching cache
+        let result = scheduler.load_tile_for_prefetch(
+            &coord,
+            std::path::Path::new("/no/such/tile.jpg"),
+            0, // stale
+        );
+        assert!(result.is_none());
+        assert!(scheduler.in_flight.lock().is_empty());
+        assert!(!scheduler.cache.contains(&coord));
     }
 }

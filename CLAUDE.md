@@ -30,10 +30,13 @@ src/fastpath/
     └── manager.py     # AIPluginManager (discovery, loading, worker thread)
 
 src/fastpath_core/src/ (Rust, PyO3/maturin — VIEWER ONLY)
-├── scheduler.rs       # RustTileScheduler (orchestrates cache + prefetch)
+├── lib.rs             # PyO3 RustTileScheduler (Python-facing wrapper)
+├── scheduler.rs       # TileScheduler (orchestrates cache + prefetch + dedup)
 ├── cache.rs           # moka tile cache (TinyLFU eviction)
 ├── prefetch.rs        # Viewport-based prefetching, rayon thread pool
-└── decoder.rs         # zune-jpeg SIMD JPEG decoding
+├── format.rs          # SlideMetadata, TilePathResolver (.fastpath layout)
+├── decoder.rs         # zune-jpeg SIMD JPEG decoding
+└── error.rs           # TileError enum
 ```
 
 ### Cross-dependency summary
@@ -67,6 +70,15 @@ Tiles are cached in two layers:
 
 The `CACHE_MISS_THRESHOLD = 0.3` in `config.py` controls tile visibility: if >30% of visible tiles are uncached, all tiles render immediately (avoids prolonged gray screen at low zoom). A `_fallback_tile_model` shows previous-level tiles during zoom transitions.
 
+### Rust concurrency: in-flight dedup & generation counter
+
+`TileScheduler` has two concurrency mechanisms in `scheduler.rs`:
+
+- **`in_flight: Mutex<HashSet<TileCoord>>`** — prevents duplicate decode work in **prefetch only**. Before decoding, a prefetch thread claims the coord; if already claimed, it returns `None` (skips). The lock is held only for the `HashSet` insert/remove, not during decode.
+- **`generation: AtomicU64`** — monotonic counter bumped in `load()`/`close()` before clearing cache. Prefetch methods capture the generation before starting, then `load_tile_for_prefetch()` checks it at three points (before claiming, after claiming, after decode) to discard stale tiles from a previous slide. Memory ordering: `Release` on bump, `Acquire` on read.
+
+`get_tile()` (user-facing) bypasses in-flight dedup entirely — explicit user requests always decode directly, even if a prefetch thread is concurrently decoding the same tile. This avoids returning `None` to QML, which would cache a placeholder permanently. Only background prefetch is generation-guarded and dedup-guarded.
+
 ## Preprocessing
 
 Always **0.5 MPP** (20x equivalent), **JPEG Q80**, via pyvips `dzsave()`. These are hardcoded — not configurable.
@@ -87,6 +99,7 @@ uv run python -m fastpath.preprocess <input.svs> -o <output_dir>           # Run
 uv run python -m pytest tests/                                             # All tests
 uv run python -m pytest tests/test_annotations.py -k "test_name"           # Single test
 cd src/fastpath_core && cargo test                                         # Rust tests
+cd src/fastpath_core && cargo clippy -- -D warnings                        # Rust lint (must pass clean)
 ```
 
 The Rust release build uses `lto = true` and `codegen-units = 1` for maximum optimization, which makes builds slow. For faster iteration during Rust development, temporarily remove these from `Cargo.toml` or use `maturin develop` without `--release`.

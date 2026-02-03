@@ -53,11 +53,11 @@ pub fn decode_tile(path: &Path) -> TileResult<TileData> {
 
     let pixels = decoder
         .decode()
-        .map_err(|e| TileError::DecodeError(format!("Failed to decode JPEG: {:?}", e)))?;
+        .map_err(|e| TileError::Decode(format!("Failed to decode JPEG: {:?}", e)))?;
 
     let info = decoder
         .info()
-        .ok_or_else(|| TileError::DecodeError("Failed to get image info".to_string()))?;
+        .ok_or_else(|| TileError::Decode("Failed to get image info".to_string()))?;
 
     let width = info.width as u32;
     let height = info.height as u32;

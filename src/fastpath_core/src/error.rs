@@ -8,16 +8,16 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum TileError {
     #[error("Failed to decode JPEG: {0}")]
-    DecodeError(String),
+    Decode(String),
 
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 
     #[error("JSON parse error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    Json(#[from] serde_json::Error),
 
     #[error("Invalid metadata: {0}")]
-    ValidationError(String),
+    Validation(String),
 }
 
 impl From<TileError> for PyErr {

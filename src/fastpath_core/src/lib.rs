@@ -109,6 +109,7 @@ impl RustTileScheduler {
     ///     velocity_x: Horizontal pan velocity (pixels/second)
     ///     velocity_y: Vertical pan velocity (pixels/second)
     #[pyo3(signature = (x, y, width, height, scale, velocity_x=0.0, velocity_y=0.0))]
+    #[allow(clippy::too_many_arguments)]
     fn update_viewport(
         &self,
         x: f64,
