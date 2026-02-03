@@ -67,11 +67,15 @@ _slide_manager.load()          # 3. Emits slideLoaded → QML requests tiles
 ```
 If SlideManager loads first, `slideLoaded` triggers QML tile requests before the cache is populated → gray tiles.
 
-### Dual-cache architecture
+### Three-tier cache architecture
 
-Tiles are cached in two layers:
-1. **Rust moka** (12GB default) — primary cache, concurrent, TinyLFU eviction
-2. **Python OrderedDict** (256 tiles default) — secondary LRU in `SlideManager`, keyed by `TileCoord`
+Tile lookup order: **L1 → L2 → disk**.
+
+1. **L1 — Rust moka** (4GB default) — decoded RGB tiles, concurrent TinyLFU eviction, cleared on slide switch
+2. **L2 — Rust moka** (compressed JPEG bytes) — persists across slide switches, keyed by `SlideTileCoord` (includes `slide_id` hash). L2 hits decode JPEG (~2ms) and promote to L1, replacing ~5-10ms disk reads for previously-viewed slides
+3. **Python OrderedDict** (256 tiles default) — tertiary LRU in `SlideManager`, keyed by `TileCoord`
+
+Every disk read writes through to L2 as a side effect. L2 is never cleared — tiles from different slides coexist via `slide_id` scoping. `filter_cached_tiles()` counts L2 entries as "available" for the cache miss threshold.
 
 The `CACHE_MISS_THRESHOLD = 0.3` in `config.py` controls tile visibility: if >30% of visible tiles are uncached, all tiles render immediately (avoids prolonged gray screen at low zoom). A `_fallback_tile_model` shows previous-level tiles during zoom transitions.
 
@@ -109,6 +113,8 @@ cd src/fastpath_core && cargo clippy -- -D warnings                        # Rus
 
 The Rust release build uses `lto = true` and `codegen-units = 1` for maximum optimization, which makes builds slow. For faster iteration during Rust development, temporarily remove these from `Cargo.toml` or use `maturin develop` without `--release`.
 
+**IMPORTANT:** Always rebuild with `--release` after making Rust changes. Debug builds cause RAM explosion (system commit + physical memory) and severe performance degradation. Never leave a debug build installed for real usage.
+
 ## Code Conventions
 
 - **Python**: PySide6 (not PyQt6), `pathlib.Path`, type hints throughout, build system is Hatchling
@@ -124,10 +130,12 @@ All overridable in `config.py`:
 | Variable | Default | Description |
 |---|---|---|
 | `FASTPATH_VIPS_PATH` | `C:/vips` | Base path for VIPS installation |
-| `FASTPATH_TILE_CACHE_MB` | `12288` | Rust tile cache size (MB) |
+| `FASTPATH_L1_CACHE_MB` | `4096` | Rust L1 tile cache size in MB (decoded RGB) |
+| `FASTPATH_L2_CACHE_MB` | `32768` | Rust L2 compressed cache size in MB (JPEG bytes) |
 | `FASTPATH_PREFETCH_DISTANCE` | `3` | Tiles to prefetch ahead |
 | `FASTPATH_PYTHON_CACHE_SIZE` | `256` | Python-side LRU cache (tiles) |
 | `FASTPATH_VIPS_CONCURRENCY` | `24` | VIPS internal thread count |
+| `FASTPATH_TILE_TIMING` | unset | Set to `1` for per-tile disk/decode/total timing on stderr |
 
 ## Windows Notes
 
@@ -143,6 +151,8 @@ All overridable in `config.py`:
 - **Tile decode errors**: Rust logs `[TILE ERROR]` to stderr
 - **Prefetch stats**: `[PREFETCH] Loading N tiles...` / `[PREFETCH] Done: X loaded, Y failed` in stderr
 - **Race conditions**: `AppController._loading_lock` prevents concurrent slide loads
+- **L2 cache verification**: `cache_stats()` — L2 hits should be nonzero when reopening a previously-viewed slide
+- **Per-tile timing**: Set `FASTPATH_TILE_TIMING=1` for `[TILE TIMING]` lines on stderr showing disk/L2/decode/total breakdowns
 
 ## Git Worktree Workflow
 

@@ -54,13 +54,13 @@ impl RustTileScheduler {
     /// Create a new tile scheduler.
     ///
     /// Args:
-    ///     cache_size_mb: Maximum L1 cache size in megabytes (default: 12288 = 12GB).
+    ///     cache_size_mb: Maximum L1 cache size in megabytes (default: 4096 = 4GB).
     ///         Holds decoded RGB tile data.
     ///     l2_cache_size_mb: Maximum L2 cache size in megabytes (default: 32768 = 32GB).
     ///         Holds compressed JPEG bytes; persists across slide switches.
     ///     prefetch_distance: Number of tiles to prefetch ahead (default: 3)
     #[new]
-    #[pyo3(signature = (cache_size_mb=12288, l2_cache_size_mb=32768, prefetch_distance=3))]
+    #[pyo3(signature = (cache_size_mb=4096, l2_cache_size_mb=32768, prefetch_distance=3))]
     fn new(cache_size_mb: usize, l2_cache_size_mb: usize, prefetch_distance: u32) -> Self {
         Self {
             inner: TileScheduler::new(cache_size_mb, l2_cache_size_mb, prefetch_distance),

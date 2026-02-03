@@ -5,7 +5,8 @@ Values can be overridden via environment variables.
 
 Environment Variables:
     FASTPATH_VIPS_PATH: Base path for VIPS installation (default: C:/vips)
-    FASTPATH_TILE_CACHE_MB: Rust scheduler tile cache size in MB (default: 4096)
+    FASTPATH_L1_CACHE_MB: Rust L1 tile cache size in MB, decoded RGB (default: 4096)
+    FASTPATH_L2_CACHE_MB: Rust L2 compressed cache size in MB, JPEG bytes (default: 32768)
     FASTPATH_PREFETCH_DISTANCE: Tiles to prefetch ahead (default: 3)
     FASTPATH_PYTHON_CACHE_SIZE: Python tile cache size in tiles (default: 256)
     FASTPATH_VIPS_CONCURRENCY: VIPS internal thread count (default: 24)
@@ -58,8 +59,11 @@ VIPS_REQUIRED_DLLS: tuple[str, ...] = ("libopenslide-1.dll", "libvips-42.dll")
 # Tile Cache Configuration
 # =============================================================================
 
-#: Rust tile scheduler cache size in MB (default: 4GB)
-TILE_CACHE_SIZE_MB: int = _get_env_int("FASTPATH_TILE_CACHE_MB", 4096)
+#: Rust L1 tile cache size in MB (decoded RGB tiles, cleared on slide switch)
+L1_CACHE_SIZE_MB: int = _get_env_int("FASTPATH_L1_CACHE_MB", 4096)
+
+#: Rust L2 compressed tile cache size in MB (JPEG bytes, persists across slide switches)
+L2_CACHE_SIZE_MB: int = _get_env_int("FASTPATH_L2_CACHE_MB", 32768)
 
 #: Number of tiles to prefetch in pan direction
 PREFETCH_DISTANCE: int = _get_env_int("FASTPATH_PREFETCH_DISTANCE", 3)
@@ -139,13 +143,19 @@ RGB_BYTES_PER_PIXEL: int = 3
 
 def _validate_config() -> None:
     """Validate configuration values and log warnings for out-of-range settings."""
-    global TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, PYTHON_TILE_CACHE_SIZE
+    global L1_CACHE_SIZE_MB, L2_CACHE_SIZE_MB, PREFETCH_DISTANCE, PYTHON_TILE_CACHE_SIZE
 
-    if TILE_CACHE_SIZE_MB < 1:
+    if L1_CACHE_SIZE_MB < 1:
         logger.warning(
-            "TILE_CACHE_SIZE_MB=%d is too low, clamping to 1", TILE_CACHE_SIZE_MB
+            "L1_CACHE_SIZE_MB=%d is too low, clamping to 1", L1_CACHE_SIZE_MB
         )
-        TILE_CACHE_SIZE_MB = 1
+        L1_CACHE_SIZE_MB = 1
+
+    if L2_CACHE_SIZE_MB < 1:
+        logger.warning(
+            "L2_CACHE_SIZE_MB=%d is too low, clamping to 1", L2_CACHE_SIZE_MB
+        )
+        L2_CACHE_SIZE_MB = 1
 
     if PREFETCH_DISTANCE < 0:
         logger.warning(

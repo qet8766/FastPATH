@@ -12,7 +12,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
+from fastpath.config import L1_CACHE_SIZE_MB, L2_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
 from fastpath.core.paths import to_local_path
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
@@ -574,7 +574,9 @@ def run_app(args: list[str] | None = None) -> int:
 
     # Create Rust scheduler with configured cache and prefetch settings
     rust_scheduler = RustTileScheduler(
-        cache_size_mb=TILE_CACHE_SIZE_MB, prefetch_distance=PREFETCH_DISTANCE
+        cache_size_mb=L1_CACHE_SIZE_MB,
+        l2_cache_size_mb=L2_CACHE_SIZE_MB,
+        prefetch_distance=PREFETCH_DISTANCE,
     )
     logger.info("Rust tile scheduler initialized")
 
