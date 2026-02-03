@@ -12,3 +12,8 @@ PreprocessFileList 1.0 PreprocessFileList.qml
 PreprocessProgress 1.0 PreprocessProgress.qml
 PreprocessResult 1.0 PreprocessResult.qml
 CacheStatsOverlay 1.0 CacheStatsOverlay.qml
+SlideInfoPanel 1.0 SlideInfoPanel.qml
+OverviewPanel 1.0 OverviewPanel.qml
+ViewControlsPanel 1.0 ViewControlsPanel.qml
+NavigationPanel 1.0 NavigationPanel.qml
+InteractionLayer 1.0 InteractionLayer.qml

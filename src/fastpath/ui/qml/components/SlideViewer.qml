@@ -62,6 +62,16 @@ Item {
                 scale: root.scale
                 z: 1
             }
+
+            // Interaction overlay (mode-based: draw, roi, measure)
+            InteractionLayer {
+                id: interactionLayer
+                anchors.fill: parent
+                slideScale: root.scale
+                contentX: flickable.contentX
+                contentY: flickable.contentY
+                z: 2
+            }
         }
 
         onContentXChanged: updateViewport()

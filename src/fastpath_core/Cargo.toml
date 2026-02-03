@@ -27,3 +27,9 @@ tempfile = "3.15"
 lto = true
 codegen-units = 1
 opt-level = 3
+
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+lto = false
+codegen-units = 16

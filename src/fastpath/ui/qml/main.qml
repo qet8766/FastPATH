@@ -257,167 +257,33 @@ ApplicationWindow {
                 anchors.margins: Theme.spacingNormal
                 spacing: Theme.spacingNormal
 
-                // Slide info
-                ThemedGroupBox {
+                SlideInfoPanel {
                     Layout.fillWidth: true
-                    title: "Slide Info"
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: Theme.spacingSmall
-
-                        Label {
-                            text: "File: " + SlideManager.sourceFile
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                            elide: Text.ElideMiddle
-                            Layout.fillWidth: true
-                        }
-
-                        Label {
-                            text: "Size: " + SlideManager.width + " x " + SlideManager.height
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-
-                        Label {
-                            text: "Magnification: " + SlideManager.magnification + "x"
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-
-                        Label {
-                            text: "MPP: " + SlideManager.mpp.toFixed(3)
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-
-                        Label {
-                            text: "Levels: " + SlideManager.numLevels
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-                    }
                 }
 
-                // Thumbnail / minimap
-                ThemedGroupBox {
+                OverviewPanel {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 200
-                    title: "Overview"
-
-                    Image {
-                        anchors.fill: parent
-                        source: SlideManager.isLoaded ? "image://thumbnail/slide" : ""
-                        fillMode: Image.PreserveAspectFit
-                        cache: false
-
-                        // Viewport indicator
-                        Rectangle {
-                            id: viewportIndicator
-                            color: "transparent"
-                            border.color: Theme.primary
-                            border.width: 2
-
-                            // Calculate position based on viewer viewport
-                            property real imgScale: Math.min(
-                                parent.paintedWidth / SlideManager.width,
-                                parent.paintedHeight / SlideManager.height
-                            )
-                            property real offsetX: (parent.width - parent.paintedWidth) / 2
-                            property real offsetY: (parent.height - parent.paintedHeight) / 2
-
-                            x: offsetX + viewer.viewportX * imgScale
-                            y: offsetY + viewer.viewportY * imgScale
-                            width: Math.max(4, viewer.viewportWidth * imgScale)
-                            height: Math.max(4, viewer.viewportHeight * imgScale)
-                        }
-                    }
+                    viewerViewportX: viewer.viewportX
+                    viewerViewportY: viewer.viewportY
+                    viewerViewportWidth: viewer.viewportWidth
+                    viewerViewportHeight: viewer.viewportHeight
                 }
 
-                // View controls
-                ThemedGroupBox {
+                ViewControlsPanel {
                     Layout.fillWidth: true
-                    title: "View"
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: Theme.spacingSmall
-
-                        Label {
-                            text: "Zoom: " + (viewer.scale * 100).toFixed(0) + "%"
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
-
-                        Slider {
-                            Layout.fillWidth: true
-                            from: Math.log(Theme.minScale)
-                            to: Math.log(Theme.maxScale)
-                            value: Math.log(viewer.scale)
-                            onMoved: viewer.scale = Math.exp(value)
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.spacingSmall
-
-                            ThemedButton {
-                                text: "Fit"
-                                buttonSize: "small"
-                                Layout.fillWidth: true
-                                onClicked: viewer.fitToWindow()
-                            }
-
-                            ThemedButton {
-                                text: "1:1"
-                                buttonSize: "small"
-                                Layout.fillWidth: true
-                                onClicked: viewer.resetView()
-                            }
-                        }
-                    }
+                    viewerScale: viewer.scale
+                    onFitRequested: viewer.fitToWindow()
+                    onResetRequested: viewer.resetView()
+                    onZoomRequested: (newScale) => { viewer.scale = newScale }
                 }
 
-                // Navigation (only shown with multiple slides)
-                ThemedGroupBox {
+                NavigationPanel {
                     Layout.fillWidth: true
-                    title: "Navigation"
                     visible: Navigator.hasMultipleSlides
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: Theme.spacingSmall
-
-                        Label {
-                            text: "Slide " + (Navigator.currentIndex + 1) + " of " + Navigator.totalSlides
-                            color: Theme.text
-                            font.pixelSize: Theme.fontSizeSmall
-                            Layout.alignment: Qt.AlignHCenter
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.spacingSmall
-
-                            ThemedButton {
-                                text: "< Prev"
-                                buttonSize: "small"
-                                Layout.fillWidth: true
-                                enabled: Navigator.currentIndex > 0
-                                onClicked: App.openPreviousSlide()
-                            }
-
-                            ThemedButton {
-                                text: "Next >"
-                                buttonSize: "small"
-                                Layout.fillWidth: true
-                                enabled: Navigator.currentIndex < Navigator.totalSlides - 1
-                                onClicked: App.openNextSlide()
-                            }
-                        }
-                    }
                 }
+
+                // Feature branches add new panels here as single lines
 
                 Item { Layout.fillHeight: true }
             }

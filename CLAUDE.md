@@ -138,3 +138,45 @@ All overridable in `config.py`:
 - **Tile decode errors**: Rust logs `[TILE ERROR]` to stderr
 - **Prefetch stats**: `[PREFETCH] Loading N tiles...` / `[PREFETCH] Done: X loaded, Y failed` in stderr
 - **Race conditions**: `AppController._loading_lock` prevents concurrent slide loads
+
+## Git Worktree Workflow
+
+This project uses git worktrees for parallel feature development. Each feature branch gets its own working directory with independent `.venv` and Rust build artifacts.
+
+### Branch naming
+
+- `feature/<name>` — new functionality
+- `fix/<name>` — bug fixes
+- `infra/<name>` — tooling, CI, build changes
+
+### Worktree scripts
+
+```powershell
+.\scripts\new-worktree.ps1 -Branch feature/annotations           # Full release build
+.\scripts\new-worktree.ps1 -Branch feature/ui-polish -Fast        # Fast Rust build (no LTO)
+.\scripts\remove-worktree.ps1 -Branch feature/annotations         # Clean up
+.\scripts\remove-worktree.ps1 -Branch feature/test -DeleteBranch  # Clean up + delete branch
+```
+
+Worktrees are created at `C:\chest\projects\FastPATH-wt-<branch-slug>\` (sibling directories).
+
+### Rust build profiles
+
+- `--release` — full LTO, slow build, maximum performance (production)
+- `--profile dev-fast` — opt-level 2, no LTO, fast build (feature branches that don't touch Rust)
+
+### Merge strategy
+
+1. Rebase onto master, fast-forward merge
+2. Recommended merge order (minimizes conflicts):
+   1. `feature/preprocessing` — isolated module, zero conflict risk
+   2. `feature/rust-performance` — isolated module, zero conflict risk
+   3. `feature/frontend-ui` — minimal `main.qml` touch
+   4. `feature/annotations` — `InteractionLayer` + sidebar + menu
+   5. `feature/ai-plugins` — `InteractionLayer` + sidebar + `app.py` (last, rebases on annotation changes)
+
+### Modular QML architecture
+
+Sidebar panels are extracted into individual components (`SlideInfoPanel`, `OverviewPanel`, `ViewControlsPanel`, `NavigationPanel`). Feature branches add new panels as single-line additions to the `ColumnLayout` in `main.qml`'s sidebar — these merge cleanly across branches.
+
+`InteractionLayer.qml` in `SlideViewer.qml` is a mode-based overlay (`"none"`, `"draw"`, `"roi"`, `"measure"`). Feature branches extend it by adding handlers for their specific modes in separate code sections.
