@@ -142,7 +142,7 @@ class PluginOutput:
             "processingTime": self.processing_time,
         }
 
-        # Determine primary output type for backward compat
+        # Determine primary output type (used by PluginPanel.qml)
         if self.classification is not None:
             result["outputType"] = OutputType.CLASSIFICATION.value
             result["classification"] = self.classification

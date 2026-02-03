@@ -1,8 +1,6 @@
 """PluginController — QML facade for the plugin system.
 
-Composes ``PluginRegistry`` + ``PluginExecutor``. Exposes the same signal
-names and slot signatures as the old ``AIPluginManager`` for QML backward
-compatibility.
+Composes ``PluginRegistry`` + ``PluginExecutor``.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ logger = logging.getLogger(__name__)
 class PluginController(QObject):
     """Thin QML-facing facade over PluginRegistry + PluginExecutor."""
 
-    # Same signal names as old AIPluginManager
     pluginsChanged = Signal()
     processingStarted = Signal(str)
     processingFinished = Signal(dict)
@@ -90,7 +87,7 @@ class PluginController(QObject):
             self.pluginsChanged.emit()
 
     # ------------------------------------------------------------------
-    # QML Slots — same signatures as old AIPluginManager
+    # QML Slots
     # ------------------------------------------------------------------
 
     @Slot(result="QVariantList")
@@ -104,8 +101,6 @@ class PluginController(QObject):
                 "version": meta.version,
                 "author": meta.author,
                 "inputType": meta.input_type.value,
-                # Backward compat: first output type as string
-                "outputType": meta.output_types[0].value if meta.output_types else "",
                 "outputTypes": [ot.value for ot in meta.output_types],
                 "labels": meta.labels,
                 "isLoaded": name in self._loaded_models,
@@ -127,7 +122,6 @@ class PluginController(QObject):
             "version": meta.version,
             "author": meta.author,
             "inputType": meta.input_type.value,
-            "outputType": meta.output_types[0].value if meta.output_types else "",
             "outputTypes": [ot.value for ot in meta.output_types],
             "inputSize": list(meta.input_size) if meta.input_size else None,
             "labels": meta.labels,
@@ -178,10 +172,7 @@ class PluginController(QObject):
         height: float,
         mpp: float,
     ) -> None:
-        """Process a region using a plugin.
-
-        Same 7-argument signature as old AIPluginManager.processRegion.
-        """
+        """Process a region using a plugin."""
         plugin = self._registry.get(plugin_name)
         if plugin is None:
             self.processingError.emit(f"Plugin not found: {plugin_name}")

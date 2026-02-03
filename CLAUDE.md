@@ -25,9 +25,14 @@ src/fastpath/
 │   ├── providers.py   # TileImageProvider (QML → Rust bridge)
 │   ├── models.py      # TileModel, RecentFilesModel, FileListModel
 │   └── qml/           # QML components (SlideViewer, TileLayer, Theme)
-└── ai/                # VIEWER ONLY
-    ├── base.py        # AIPlugin ABC
-    └── manager.py     # AIPluginManager (discovery, loading, worker thread)
+└── plugins/           # VIEWER ONLY
+    ├── base.py        # Plugin / ModelPlugin ABCs
+    ├── types.py       # PluginMetadata, PluginOutput, RegionOfInterest
+    ├── registry.py    # PluginRegistry (discovery, registration)
+    ├── executor.py    # PluginExecutor (worker thread, SlideContext bridge)
+    ├── controller.py  # PluginController (QML facade)
+    ├── context.py     # SlideContext (tile access for plugins)
+    └── examples/      # Built-in demo plugins
 
 src/fastpath_core/src/ (Rust, PyO3/maturin — VIEWER ONLY)
 ├── lib.rs             # PyO3 RustTileScheduler (Python-facing wrapper)
@@ -43,10 +48,10 @@ src/fastpath_core/src/ (Rust, PyO3/maturin — VIEWER ONLY)
 
 | Working on… | Read these | Safe to ignore |
 |---|---|---|
-| **Viewer (UI/rendering)** | `ui/`, `core/`, `ai/`, `fastpath_core/`, `config.py` | `preprocess/` (only lazy-imported for in-app preprocessing) |
-| **Preprocessing CLI** | `preprocess/`, `core/types.py`, `config.py` | `ui/`, `ai/`, `core/slide.py`, `core/annotations.py`, `fastpath_core/` |
+| **Viewer (UI/rendering)** | `ui/`, `core/`, `plugins/`, `fastpath_core/`, `config.py` | `preprocess/` (only lazy-imported for in-app preprocessing) |
+| **Preprocessing CLI** | `preprocess/`, `core/types.py`, `config.py` | `ui/`, `plugins/`, `core/slide.py`, `core/annotations.py`, `fastpath_core/` |
 | **Rust tile scheduler** | `src/fastpath_core/src/` | All Python except `ui/app.py` and `ui/providers.py` (callers) |
-| **AI plugins** | `ai/`, `core/slide.py`, `preprocess/backends.py` | `preprocess/pyramid.py`, `preprocess/worker.py`, `fastpath_core/` |
+| **Plugins** | `plugins/`, `preprocess/backends.py` | `preprocess/pyramid.py`, `preprocess/worker.py`, `fastpath_core/` |
 
 ### Communication between sides
 

@@ -250,7 +250,7 @@ class TestPluginOutput:
         assert d["hasTileScores"] is True
         assert d["measurements"]["tissue_fraction"] == 0.5
 
-    def test_output_type_backward_compat(self):
+    def test_output_type_in_dict(self):
         output = PluginOutput(
             success=True,
             classification={"label": "Normal", "confidence": 0.8},
@@ -523,8 +523,7 @@ class TestPluginController:
         assert info is not None
         assert info["name"] == "Tissue Classifier (Demo)"
         assert info["inputType"] == "region"
-        assert info["outputType"] == "classification"
-        assert "outputTypes" in info
+        assert info["outputTypes"] == ["classification"]
         assert "workingMpp" in info
 
     def test_nonexistent_plugin(self, qapp):

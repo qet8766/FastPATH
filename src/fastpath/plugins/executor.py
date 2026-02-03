@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -146,12 +147,13 @@ class PluginExecutor:
     def cleanup_worker(self) -> None:
         """Disconnect and wait for any existing worker."""
         if self._worker is not None:
-            try:
-                self._worker.finished.disconnect()
-                self._worker.error.disconnect()
-                self._worker.progress.disconnect()
-            except RuntimeError:
-                pass
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                for sig in (self._worker.finished, self._worker.error, self._worker.progress):
+                    try:
+                        sig.disconnect()
+                    except RuntimeError:
+                        pass
             if self._worker.isRunning():
                 if not self._worker.wait(5000):
                     logger.warning("Plugin worker did not finish within 5s timeout")
