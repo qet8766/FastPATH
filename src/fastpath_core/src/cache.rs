@@ -188,8 +188,6 @@ impl CompressedTileCache {
     }
 
     /// Get a compressed tile from the cache.
-    /// Used by L2 cache reads (Part 4) and tests.
-    #[allow(dead_code)]
     pub fn get(&self, coord: &SlideTileCoord) -> Option<CompressedTileData> {
         if let Some(tile) = self.inner.get(coord) {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -206,8 +204,6 @@ impl CompressedTileCache {
     }
 
     /// Check if a compressed tile is in the cache.
-    /// Used by L2 cache reads (Part 4) and tests.
-    #[allow(dead_code)]
     pub fn contains(&self, coord: &SlideTileCoord) -> bool {
         self.inner.contains_key(coord)
     }
