@@ -8,7 +8,7 @@ Environment Variables:
     FASTPATH_TILE_CACHE_MB: Rust scheduler tile cache size in MB (default: 12288)
     FASTPATH_PREFETCH_DISTANCE: Tiles to prefetch ahead (default: 3)
     FASTPATH_PYTHON_CACHE_SIZE: Python tile cache size in tiles (default: 256)
-    FASTPATH_VIPS_CONCURRENCY: VIPS internal thread count (default: 8)
+    FASTPATH_VIPS_CONCURRENCY: VIPS internal thread count (default: 24)
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ DEFAULT_TILE_SIZE: int = 512
 # =============================================================================
 
 #: VIPS internal concurrency (threads)
-VIPS_CONCURRENCY: str = _get_env_str("FASTPATH_VIPS_CONCURRENCY", "8")
+VIPS_CONCURRENCY: str = _get_env_str("FASTPATH_VIPS_CONCURRENCY", "24")
 
 #: VIPS disc threshold for keeping images in RAM
 VIPS_DISC_THRESHOLD: str = "3g"

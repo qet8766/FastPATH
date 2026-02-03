@@ -117,7 +117,7 @@ class VipsPyramidBuilder:
             slide_path, progress_callback
         )
         self._run_dzsave(image, pyramid_dir, progress_callback)
-        levels = self._calculate_levels_from_dzsave(pyramid_dir / "tiles_files")
+        levels = self._calculate_levels_from_dimensions(dimensions[0], dimensions[1], self.tile_size)
         self._write_metadata(
             pyramid_dir, slide_path, base_mpp, actual_mpp, actual_mag, dimensions, levels
         )
@@ -379,63 +379,41 @@ class VipsPyramidBuilder:
         logger.warning("No MPP metadata in %s, assuming 40x (0.25 MPP)", slide_name)
         return 0.25
 
-    def _calculate_levels_from_dzsave(self, dzsave_dir: Path) -> list[LevelInfo]:
-        """Calculate level info from dzsave output.
+    def _calculate_levels_from_dimensions(
+        self, width: int, height: int, tile_size: int
+    ) -> list[LevelInfo]:
+        """Calculate level info from image dimensions and tile size.
 
-        dzsave creates levels from 0 (smallest/lowest resolution) to N
-        (largest/full resolution). Level numbers are used directly — no
-        inversion needed.
+        Computes the pyramid structure mathematically instead of scanning
+        the filesystem. Uses iterative ceiling-halving to match libvips
+        dzsave with ``depth="onetile"``.
 
         Args:
-            dzsave_dir: Path to slide_files directory created by dzsave
+            width: Image width in pixels
+            height: Image height in pixels
+            tile_size: Tile size in pixels
 
         Returns:
-            List of LevelInfo in native dzsave order (0 = lowest resolution)
+            List of LevelInfo in dzsave order (0 = lowest resolution)
         """
-        if not dzsave_dir.exists():
-            return []
+        dims = [(width, height)]
+        w, h = width, height
+        while w > tile_size or h > tile_size:
+            w = (w + 1) // 2
+            h = (h + 1) // 2
+            dims.append((w, h))
 
-        # Find all level directories
-        level_dirs = sorted(
-            [d for d in dzsave_dir.iterdir() if d.is_dir() and d.name.isdigit()],
-            key=lambda d: int(d.name)
-        )
-
-        if not level_dirs:
-            return []
-
-        max_dz_level = int(level_dirs[-1].name)
+        dims.reverse()  # level 0 = smallest
+        max_level = len(dims) - 1
 
         levels = []
-        for level_dir in level_dirs:
-            dz_level = int(level_dir.name)
-
-            # Count tiles to determine grid size
-            tiles = list(level_dir.glob("*.jpg"))
-            if not tiles:
-                continue
-
-            # Parse tile coordinates to find max col/row
-            max_col = 0
-            max_row = 0
-            for tile_path in tiles:
-                parts = tile_path.stem.split("_")
-                if len(parts) == 2:
-                    col, row = int(parts[0]), int(parts[1])
-                    max_col = max(max_col, col)
-                    max_row = max(max_row, row)
-
-            cols = max_col + 1
-            rows = max_row + 1
-            downsample = 2 ** (max_dz_level - dz_level)
-
+        for i, (lw, lh) in enumerate(dims):
             levels.append(LevelInfo(
-                level=dz_level,
-                downsample=downsample,
-                cols=cols,
-                rows=rows,
+                level=i,
+                downsample=2 ** (max_level - i),
+                cols=(lw + tile_size - 1) // tile_size,
+                rows=(lh + tile_size - 1) // tile_size,
             ))
-
         return levels
 
 

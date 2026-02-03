@@ -15,7 +15,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from fastpath.config import TILE_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
 from fastpath.core.slide import SlideManager
 from fastpath.core.annotations import AnnotationManager
-from fastpath.ai.manager import AIPluginManager
+from fastpath.plugins.controller import PluginController
 from fastpath.ui.providers import TileImageProvider, ThumbnailProvider
 from fastpath.ui.models import TileModel, RecentFilesModel
 from fastpath.ui.navigator import SlideNavigator
@@ -38,7 +38,7 @@ class AppController(QObject):
         self,
         slide_manager: SlideManager,
         annotation_manager: AnnotationManager,
-        plugin_manager: AIPluginManager,
+        plugin_manager: PluginController,
         rust_scheduler: RustTileScheduler,
         parent: QObject | None = None,
     ) -> None:
@@ -83,7 +83,7 @@ class AppController(QObject):
         return self._annotation_manager
 
     @Property(QObject, constant=True)
-    def pluginManager(self) -> AIPluginManager:
+    def pluginManager(self) -> PluginController:
         """Access to the AI plugin manager."""
         return self._plugin_manager
 
@@ -164,6 +164,7 @@ class AppController(QObject):
 
             logger.info("Slide loaded: %s", resolved)
 
+            self._plugin_manager.set_slide(str(resolved))
             self._current_path = str(resolved)
             self.slidePathChanged.emit()
             self._recent_files.addFile(str(resolved), resolved.name)
@@ -182,6 +183,7 @@ class AppController(QObject):
         """Close the current slide."""
         self._slide_manager.close()
         self._rust_scheduler.close()
+        self._plugin_manager.clear_slide()
         self._current_path = ""
         self.slidePathChanged.emit()
         self._tile_model.clear()
@@ -367,7 +369,7 @@ def run_app(args: list[str] | None = None) -> int:
     # Create managers
     slide_manager = SlideManager()
     annotation_manager = AnnotationManager()
-    plugin_manager = AIPluginManager()
+    plugin_manager = PluginController()
 
     # Create Rust scheduler with configured cache and prefetch settings
     rust_scheduler = RustTileScheduler(
@@ -378,11 +380,14 @@ def run_app(args: list[str] | None = None) -> int:
     # Discover AI plugins
     plugin_manager.discoverPlugins()
 
+    # Ensure plugin resources are freed on app shutdown
+    app.aboutToQuit.connect(plugin_manager.cleanup)
+
     controller = AppController(
         slide_manager, annotation_manager, plugin_manager, rust_scheduler
     )
-    preprocess_controller = PreprocessController()
     settings = Settings()
+    preprocess_controller = PreprocessController(settings=settings)
 
     # Apply saved settings to preprocess controller
     if settings.defaultOutputDir:

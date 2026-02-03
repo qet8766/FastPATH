@@ -35,3 +35,4 @@ class LevelInfo:
     downsample: int
     cols: int
     rows: int
+    mpp: float = 0.0

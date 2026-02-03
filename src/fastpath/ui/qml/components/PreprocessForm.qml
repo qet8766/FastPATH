@@ -202,6 +202,114 @@ Rectangle {
             font.italic: true
         }
 
+        // Separator
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            Layout.topMargin: Theme.spacingSmall
+            Layout.bottomMargin: Theme.spacingSmall
+            color: Theme.border
+        }
+
+        // VIPS Thread Optimization section
+        Label {
+            text: "VIPS Thread Optimization"
+            color: Theme.text
+            font.pixelSize: Theme.fontSizeSmall
+            font.bold: true
+        }
+
+        Label {
+            text: {
+                var saved = Preprocess.savedVipsConcurrency
+                if (saved > 0)
+                    return "Current: " + saved + " threads (benchmarked)"
+                return "Current: Default (" + Preprocess.defaultVipsConcurrency + " threads)"
+            }
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontSizeSmall
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            ThemedButton {
+                text: "Find Optimal Threads"
+                enabled: !root.isProcessing && !Preprocess.benchmarkRunning
+                onClicked: Preprocess.startBenchmark()
+            }
+
+            ThemedButton {
+                text: "Cancel"
+                variant: "danger"
+                visible: Preprocess.benchmarkRunning
+                onClicked: Preprocess.cancelBenchmark()
+            }
+        }
+
+        // Benchmark progress
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            visible: Preprocess.benchmarkRunning
+
+            ThemedProgressBar {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 20
+                value: Preprocess.benchmarkProgress
+            }
+
+            Label {
+                text: Preprocess.benchmarkStatus
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSizeSmall
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
+            }
+        }
+
+        // Benchmark results card
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: benchResultCol.implicitHeight + Theme.spacingLarge * 2
+            color: Theme.surface
+            radius: Theme.radiusNormal
+            border.color: Theme.success
+            border.width: 2
+            visible: Preprocess.benchmarkResult !== "" && !Preprocess.benchmarkRunning
+
+            ColumnLayout {
+                id: benchResultCol
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLarge
+                spacing: Theme.spacingNormal
+
+                Label {
+                    text: Preprocess.benchmarkResult
+                    color: Theme.text
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.family: "Consolas, monospace"
+                    lineHeight: 1.3
+                }
+
+                RowLayout {
+                    spacing: Theme.spacingSmall
+
+                    ThemedButton {
+                        text: "Apply " + Preprocess.benchmarkBestThreads + " threads"
+                        variant: "primary"
+                        onClicked: Preprocess.applyBenchmarkResult()
+                    }
+
+                    ThemedButton {
+                        text: "Dismiss"
+                        onClicked: Preprocess.clearBenchmarkResult()
+                    }
+                }
+            }
+        }
+
         // Error message
         Rectangle {
             Layout.fillWidth: true

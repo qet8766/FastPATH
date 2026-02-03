@@ -15,6 +15,9 @@ pub enum TileError {
 
     #[error("JSON parse error: {0}")]
     JsonError(#[from] serde_json::Error),
+
+    #[error("Invalid metadata: {0}")]
+    ValidationError(String),
 }
 
 impl From<TileError> for PyErr {

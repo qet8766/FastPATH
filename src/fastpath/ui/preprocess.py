@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Property, QThread, Slot
 
-from fastpath.config import WSI_EXTENSIONS
+from fastpath.config import VIPS_CONCURRENCY, WSI_EXTENSIONS
 from fastpath.ui.models import (
     FileListModel,
     STATUS_PENDING,
@@ -265,6 +268,161 @@ class BatchPreprocessWorker(QThread):
         self.allFinished.emit(processed, skipped, errors, error_details)
 
 
+_vips_concurrency_declared = False
+
+
+def _ensure_vips_concurrency_cffi() -> None:
+    """Declare vips_concurrency_get/set in pyvips cffi if not already present."""
+    global _vips_concurrency_declared
+    if _vips_concurrency_declared:
+        return
+    import pyvips
+    pyvips.ffi.cdef("int vips_concurrency_get(void);")
+    pyvips.ffi.cdef("void vips_concurrency_set(int concurrency);")
+    _vips_concurrency_declared = True
+
+
+def _set_vips_concurrency(n: int) -> None:
+    """Set VIPS concurrency at runtime via cffi."""
+    import pyvips
+    _ensure_vips_concurrency_cffi()
+    pyvips.vips_lib.vips_concurrency_set(n)
+
+
+def _get_vips_concurrency() -> int:
+    """Get current VIPS concurrency via cffi."""
+    import pyvips
+    _ensure_vips_concurrency_cffi()
+    return pyvips.vips_lib.vips_concurrency_get()
+
+
+class BenchmarkWorker(QThread):
+    """Background worker that benchmarks VIPS dzsave with different thread counts."""
+
+    progressChanged = Signal(float, str)  # progress (0-1), status message
+    finished = Signal(str, int, float)  # results text, best thread count, best time
+    errorOccurred = Signal(str)  # error message
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation of the benchmark."""
+        self._cancelled = True
+
+    # Number of repetitions per thread count (take median)
+    REPEATS = 3
+
+    def run(self) -> None:
+        """Run the benchmark across candidate thread counts."""
+        try:
+            import statistics
+
+            import numpy as np
+            import pyvips
+
+            cpu_count = os.cpu_count() or 4
+
+            # Dense candidate list: 1-8 individually, then powers/multiples
+            # of cpu_count to cover the full range
+            raw = set(range(1, min(cpu_count, 8) + 1))
+            for mult in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+                v = int(cpu_count * mult)
+                if v >= 1:
+                    raw.add(v)
+            # Also add some specific powers of 2 up to 2*cpu_count
+            for p in (8, 12, 16, 24, 32, 48, 64):
+                if p <= cpu_count * 2:
+                    raw.add(p)
+            candidates = sorted(raw)
+
+            original_concurrency = _get_vips_concurrency()
+            total_steps = len(candidates) * self.REPEATS
+            results: list[tuple[int, float]] = []  # (threads, median_time)
+
+            # Generate a synthetic test image — 16384x12288 (roughly 200 MP)
+            # random noise to defeat any compression shortcuts
+            self.progressChanged.emit(0.0, "Generating test image...")
+            rng = np.random.default_rng(42)
+            width, height = 16384, 12288
+            data = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+            test_image = pyvips.Image.new_from_memory(
+                data.tobytes(), width, height, 3, "uchar"
+            )
+
+            step = 0
+            for i, n_threads in enumerate(candidates):
+                if self._cancelled:
+                    break
+
+                timings: list[float] = []
+                for rep in range(self.REPEATS):
+                    if self._cancelled:
+                        break
+
+                    step += 1
+                    self.progressChanged.emit(
+                        step / total_steps,
+                        f"Testing {n_threads} threads (run {rep + 1}/{self.REPEATS},"
+                        f" candidate {i + 1}/{len(candidates)})...",
+                    )
+
+                    # Flush VIPS operation cache for fair measurement
+                    old_max = pyvips.cache_get_max()
+                    pyvips.cache_set_max(0)
+                    pyvips.cache_set_max(old_max)
+
+                    _set_vips_concurrency(n_threads)
+
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        out_path = str(Path(tmp_dir) / "bench")
+                        t0 = time.perf_counter()
+                        test_image.dzsave(
+                            out_path,
+                            tile_size=512,
+                            overlap=0,
+                            suffix=".jpg[Q=80]",
+                            depth="one",
+                        )
+                        elapsed = time.perf_counter() - t0
+
+                    timings.append(elapsed)
+                    logger.info(
+                        "Benchmark: %d threads, run %d -> %.2fs",
+                        n_threads, rep + 1, elapsed,
+                    )
+
+                if timings:
+                    median = statistics.median(timings)
+                    results.append((n_threads, median))
+
+            # Restore original concurrency
+            _set_vips_concurrency(original_concurrency)
+
+            if self._cancelled:
+                self.errorOccurred.emit("Benchmark cancelled")
+                return
+
+            # Format results table
+            best_threads, best_time = min(results, key=lambda r: r[1])
+            lines = [f"Threads   Median ({self.REPEATS} runs)"]
+            lines.append("─────────────────────")
+            for n_threads, median in results:
+                marker = " *" if n_threads == best_threads else ""
+                lines.append(f"  {n_threads:>4d}    {median:>6.2f}s{marker}")
+            lines.append("")
+            lines.append(f"Best: {best_threads} threads ({best_time:.2f}s)")
+            result_text = "\n".join(lines)
+
+            self.progressChanged.emit(1.0, "Benchmark complete!")
+            self.finished.emit(result_text, best_threads, best_time)
+
+        except Exception as e:
+            logger.exception("Benchmark failed")
+            self.errorOccurred.emit(str(e))
+
+
 class PreprocessController(QObject):
     """Controller for preprocessing mode exposed to QML."""
 
@@ -290,8 +448,17 @@ class PreprocessController(QObject):
     batchCompleteChanged = Signal()
     firstResultPathChanged = Signal()
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    # Benchmark signals
+    benchmarkRunningChanged = Signal()
+    benchmarkProgressChanged = Signal()
+    benchmarkStatusChanged = Signal()
+    benchmarkResultChanged = Signal()
+    benchmarkBestThreadsChanged = Signal()
+
+    def __init__(self, settings: object | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._settings = settings
+
         # Single file mode state
         self._is_processing = False
         self._progress = 0.0
@@ -318,6 +485,14 @@ class PreprocessController(QObject):
 
         # Settings with defaults
         self._tile_size = 512
+
+        # Benchmark state
+        self._benchmark_running = False
+        self._benchmark_progress = 0.0
+        self._benchmark_status = ""
+        self._benchmark_result = ""
+        self._benchmark_best_threads = 0
+        self._benchmark_worker: BenchmarkWorker | None = None
 
     def _set_processing_active(self, status: str) -> None:
         """Set processing state to active with the given status message."""
@@ -447,6 +622,119 @@ class PreprocessController(QObject):
     def firstResultPath(self) -> str:
         return self._first_result_path
 
+    # Benchmark properties
+    @Property(bool, notify=benchmarkRunningChanged)
+    def benchmarkRunning(self) -> bool:
+        return self._benchmark_running
+
+    @Property(float, notify=benchmarkProgressChanged)
+    def benchmarkProgress(self) -> float:
+        return self._benchmark_progress
+
+    @Property(str, notify=benchmarkStatusChanged)
+    def benchmarkStatus(self) -> str:
+        return self._benchmark_status
+
+    @Property(str, notify=benchmarkResultChanged)
+    def benchmarkResult(self) -> str:
+        return self._benchmark_result
+
+    @Property(int, notify=benchmarkBestThreadsChanged)
+    def benchmarkBestThreads(self) -> int:
+        return self._benchmark_best_threads
+
+    @Property(int, constant=False, notify=benchmarkBestThreadsChanged)
+    def savedVipsConcurrency(self) -> int:
+        """Return persisted VIPS concurrency (0 = use default)."""
+        if self._settings is not None:
+            return self._settings.vipsConcurrency
+        return 0
+
+    @Property(int, constant=True)
+    def defaultVipsConcurrency(self) -> int:
+        """Return the config default VIPS concurrency."""
+        try:
+            return int(VIPS_CONCURRENCY)
+        except (ValueError, TypeError):
+            return 24
+
+    @Slot()
+    def startBenchmark(self) -> None:
+        """Start the VIPS concurrency benchmark."""
+        if self._benchmark_running or self._is_processing:
+            return
+
+        self._benchmark_running = True
+        self.benchmarkRunningChanged.emit()
+        self._benchmark_progress = 0.0
+        self.benchmarkProgressChanged.emit()
+        self._benchmark_status = "Starting benchmark..."
+        self.benchmarkStatusChanged.emit()
+        self._benchmark_result = ""
+        self.benchmarkResultChanged.emit()
+        self._benchmark_best_threads = 0
+        self.benchmarkBestThreadsChanged.emit()
+
+        self._benchmark_worker = BenchmarkWorker(self)
+        self._benchmark_worker.progressChanged.connect(self._on_benchmark_progress)
+        self._benchmark_worker.finished.connect(self._on_benchmark_finished)
+        self._benchmark_worker.errorOccurred.connect(self._on_benchmark_error)
+        self._benchmark_worker.start()
+
+    @Slot()
+    def cancelBenchmark(self) -> None:
+        """Cancel the running benchmark."""
+        if self._benchmark_worker:
+            self._benchmark_worker.cancel()
+            self._benchmark_status = "Cancelling..."
+            self.benchmarkStatusChanged.emit()
+
+    @Slot()
+    def applyBenchmarkResult(self) -> None:
+        """Apply the benchmark result to settings."""
+        if self._settings is not None and self._benchmark_best_threads > 0:
+            self._settings.vipsConcurrency = self._benchmark_best_threads
+            self.benchmarkBestThreadsChanged.emit()
+
+    @Slot()
+    def clearBenchmarkResult(self) -> None:
+        """Dismiss/clear the benchmark result."""
+        self._benchmark_result = ""
+        self.benchmarkResultChanged.emit()
+        self._benchmark_best_threads = 0
+        self.benchmarkBestThreadsChanged.emit()
+        self._benchmark_status = ""
+        self.benchmarkStatusChanged.emit()
+        self._benchmark_progress = 0.0
+        self.benchmarkProgressChanged.emit()
+
+    def _on_benchmark_progress(self, progress: float, status: str) -> None:
+        """Handle benchmark progress updates."""
+        self._benchmark_progress = progress
+        self.benchmarkProgressChanged.emit()
+        self._benchmark_status = status
+        self.benchmarkStatusChanged.emit()
+
+    def _on_benchmark_finished(self, result_text: str, best_threads: int, best_time: float) -> None:
+        """Handle benchmark completion."""
+        self._benchmark_running = False
+        self.benchmarkRunningChanged.emit()
+        self._benchmark_result = result_text
+        self.benchmarkResultChanged.emit()
+        self._benchmark_best_threads = best_threads
+        self.benchmarkBestThreadsChanged.emit()
+        self._benchmark_status = f"Best: {best_threads} threads ({best_time:.2f}s)"
+        self.benchmarkStatusChanged.emit()
+        self._benchmark_worker = None
+
+    def _on_benchmark_error(self, error: str) -> None:
+        """Handle benchmark errors."""
+        self._benchmark_running = False
+        self.benchmarkRunningChanged.emit()
+        self._benchmark_status = f"Error: {error}"
+        self.benchmarkStatusChanged.emit()
+        self._benchmark_worker = None
+
     @Slot(str)
     def setInputMode(self, mode: str) -> None:
         """Set input mode (single or folder)."""
@@ -466,6 +754,14 @@ class PreprocessController(QObject):
     def setOutputDir(self, path: str) -> None:
         """Set output directory from QML (handles file:// URLs)."""
         self.outputDir = _normalize_file_url(path)
+
+    def _apply_saved_concurrency(self) -> None:
+        """Apply saved VIPS concurrency setting before starting preprocessing."""
+        if self._settings is not None:
+            saved = self._settings.vipsConcurrency
+            if saved > 0:
+                logger.info("Applying saved VIPS concurrency: %d threads", saved)
+                _set_vips_concurrency(saved)
 
     @Slot(int)
     def startPreprocess(self, tile_size: int) -> None:
@@ -487,6 +783,7 @@ class PreprocessController(QObject):
             self.errorOccurred.emit(f"Input file not found: {self._input_file}")
             return
 
+        self._apply_saved_concurrency()
         self._set_processing_active("Starting...")
         self._progress = 0.0
         self.progressChanged.emit()
@@ -575,6 +872,8 @@ class PreprocessController(QObject):
         if not self._output_dir:
             self.errorOccurred.emit("No output directory selected")
             return
+
+        self._apply_saved_concurrency()
 
         # Reset batch state
         self._reset_batch_state()

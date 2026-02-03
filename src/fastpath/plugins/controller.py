@@ -1,0 +1,246 @@
+"""PluginController — QML facade for the plugin system.
+
+Composes ``PluginRegistry`` + ``PluginExecutor``. Exposes the same signal
+names and slot signatures as the old ``AIPluginManager`` for QML backward
+compatibility.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from PySide6.QtCore import QObject, Signal, Slot, Property
+
+from .base import ModelPlugin, Plugin
+from .executor import PluginExecutor
+from .registry import PluginRegistry
+from .types import PluginOutput, RegionOfInterest
+
+logger = logging.getLogger(__name__)
+
+
+class PluginController(QObject):
+    """Thin QML-facing facade over PluginRegistry + PluginExecutor."""
+
+    # Same signal names as old AIPluginManager
+    pluginsChanged = Signal()
+    processingStarted = Signal(str)
+    processingFinished = Signal(dict)
+    processingError = Signal(str)
+    processingProgress = Signal(int)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._registry = PluginRegistry()
+        self._executor = PluginExecutor()
+        self._loaded_models: set[str] = set()
+        self._last_output: PluginOutput | None = None
+        self._cleaned_up = False
+
+    def __del__(self) -> None:
+        try:
+            if not self._cleaned_up:
+                self._executor.cleanup_worker()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @Property(int, notify=pluginsChanged)
+    def pluginCount(self) -> int:
+        return self._registry.count
+
+    @property
+    def last_output(self) -> PluginOutput | None:
+        """Most recent PluginOutput (for overlay rendering / numpy access)."""
+        return self._last_output
+
+    # ------------------------------------------------------------------
+    # Slide lifecycle (called by AppController)
+    # ------------------------------------------------------------------
+
+    def set_slide(self, path: str) -> None:
+        """Create a SlideContext for the given path."""
+        try:
+            self._executor.set_slide(path)
+        except Exception as e:
+            logger.warning("Failed to create SlideContext for %s: %s", path, e)
+
+    def clear_slide(self) -> None:
+        """Discard the current SlideContext."""
+        self._executor.clear_slide()
+
+    # ------------------------------------------------------------------
+    # Plugin registration (Python API)
+    # ------------------------------------------------------------------
+
+    def register_plugin(self, plugin: Plugin) -> None:
+        self._registry.register(plugin)
+        self.pluginsChanged.emit()
+
+    def unregister_plugin(self, name: str) -> None:
+        removed = self._registry.unregister(name)
+        if removed is not None:
+            if name in self._loaded_models:
+                if isinstance(removed, ModelPlugin):
+                    removed.unload_model()
+                self._loaded_models.discard(name)
+            self.pluginsChanged.emit()
+
+    # ------------------------------------------------------------------
+    # QML Slots — same signatures as old AIPluginManager
+    # ------------------------------------------------------------------
+
+    @Slot(result="QVariantList")
+    def getPluginList(self) -> list[dict]:
+        result = []
+        for name, plugin in self._registry.plugins.items():
+            meta = plugin.metadata
+            result.append({
+                "name": meta.name,
+                "description": meta.description,
+                "version": meta.version,
+                "author": meta.author,
+                "inputType": meta.input_type.value,
+                # Backward compat: first output type as string
+                "outputType": meta.output_types[0].value if meta.output_types else "",
+                "outputTypes": [ot.value for ot in meta.output_types],
+                "labels": meta.labels,
+                "isLoaded": name in self._loaded_models,
+                "hasModel": isinstance(plugin, ModelPlugin),
+                "workingMpp": meta.resolution.working_mpp,
+            })
+        return result
+
+    @Slot(str, result="QVariant")
+    def getPluginInfo(self, name: str) -> dict | None:
+        plugin = self._registry.get(name)
+        if plugin is None:
+            return None
+
+        meta = plugin.metadata
+        return {
+            "name": meta.name,
+            "description": meta.description,
+            "version": meta.version,
+            "author": meta.author,
+            "inputType": meta.input_type.value,
+            "outputType": meta.output_types[0].value if meta.output_types else "",
+            "outputTypes": [ot.value for ot in meta.output_types],
+            "inputSize": list(meta.input_size) if meta.input_size else None,
+            "labels": meta.labels,
+            "isLoaded": name in self._loaded_models,
+            "hasModel": isinstance(plugin, ModelPlugin),
+            "workingMpp": meta.resolution.working_mpp,
+        }
+
+    @Slot()
+    def discoverPlugins(self) -> None:
+        self._registry.discover()
+        self.pluginsChanged.emit()
+
+    @Slot(str)
+    def addPluginPath(self, path: str) -> None:
+        self._registry.add_search_path(path)
+
+    @Slot(str)
+    def loadModel(self, plugin_name: str) -> None:
+        plugin = self._registry.get(plugin_name)
+        if plugin is None:
+            return
+        if isinstance(plugin, ModelPlugin) and plugin_name not in self._loaded_models:
+            try:
+                plugin.load_model()
+                self._loaded_models.add(plugin_name)
+                self.pluginsChanged.emit()
+            except Exception as e:
+                self.processingError.emit(f"Failed to load model: {e}")
+
+    @Slot(str)
+    def unloadModel(self, plugin_name: str) -> None:
+        plugin = self._registry.get(plugin_name)
+        if plugin is not None and isinstance(plugin, ModelPlugin):
+            if plugin_name in self._loaded_models:
+                plugin.unload_model()
+                self._loaded_models.discard(plugin_name)
+                self.pluginsChanged.emit()
+
+    @Slot(str, str, float, float, float, float, float)
+    def processRegion(
+        self,
+        plugin_name: str,
+        slide_path: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        mpp: float,
+    ) -> None:
+        """Process a region using a plugin.
+
+        Same 7-argument signature as old AIPluginManager.processRegion.
+        """
+        plugin = self._registry.get(plugin_name)
+        if plugin is None:
+            self.processingError.emit(f"Plugin not found: {plugin_name}")
+            return
+
+        if self._executor.is_running:
+            self.processingError.emit("Another process is already running")
+            return
+
+        # Ensure slide context matches the requested path
+        ctx = self._executor.context
+        if ctx is None or str(ctx.slide_path) != slide_path:
+            try:
+                self._executor.set_slide(slide_path)
+            except Exception as e:
+                self.processingError.emit(f"Failed to load slide: {e}")
+                return
+
+        roi = RegionOfInterest(x=x, y=y, w=width, h=height)
+
+        try:
+            worker = self._executor.execute(plugin, region=roi, parent=self)
+        except Exception as e:
+            self.processingError.emit(str(e))
+            return
+
+        worker.finished.connect(self._on_finished)
+        worker.error.connect(self._on_error)
+        worker.progress.connect(self.processingProgress.emit)
+
+        self.processingStarted.emit(plugin_name)
+
+    # ------------------------------------------------------------------
+    # Internal handlers
+    # ------------------------------------------------------------------
+
+    def _on_finished(self, output: PluginOutput) -> None:
+        self._last_output = output
+        self.processingFinished.emit(output.to_dict())
+
+    def _on_error(self, error: str) -> None:
+        self.processingError.emit(error)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def cleanup(self) -> None:
+        """Explicitly clean up resources."""
+        if self._cleaned_up:
+            return
+        self._executor.cleanup()
+        # Unload all models
+        for name in list(self._loaded_models):
+            plugin = self._registry.get(name)
+            if plugin is not None and isinstance(plugin, ModelPlugin):
+                try:
+                    plugin.unload_model()
+                except Exception as e:
+                    logger.debug("Failed to unload model %s during cleanup: %s", name, e)
+        self._loaded_models.clear()
+        self._cleaned_up = True

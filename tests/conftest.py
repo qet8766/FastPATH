@@ -9,8 +9,18 @@ from typing import Generator
 
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from fastpath.preprocess.backends import VIPSBackend
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """Create a Qt application for testing (shared across all test files)."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
 
 
 @pytest.fixture

@@ -15,6 +15,7 @@ class Settings(QObject):
     defaultOutputDirChanged = Signal()
     lastTileSizeChanged = Signal()
     parallelWorkersChanged = Signal()
+    vipsConcurrencyChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -52,3 +53,14 @@ class Settings(QObject):
         if self.parallelWorkers != value:
             self._settings.setValue("preprocess/parallelWorkers", value)
             self.parallelWorkersChanged.emit()
+
+    # VIPS concurrency (0 = not benchmarked, use config default)
+    @Property(int, notify=vipsConcurrencyChanged)
+    def vipsConcurrency(self) -> int:
+        return self._settings.value("preprocess/vipsConcurrency", 0, int)
+
+    @vipsConcurrency.setter
+    def vipsConcurrency(self, value: int) -> None:
+        if self.vipsConcurrency != value:
+            self._settings.setValue("preprocess/vipsConcurrency", value)
+            self.vipsConcurrencyChanged.emit()

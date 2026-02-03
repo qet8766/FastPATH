@@ -29,7 +29,7 @@ src/fastpath/
     ├── base.py        # AIPlugin ABC
     └── manager.py     # AIPluginManager (discovery, loading, worker thread)
 
-fastpath_core/ (Rust, PyO3/maturin — VIEWER ONLY)
+src/fastpath_core/src/ (Rust, PyO3/maturin — VIEWER ONLY)
 ├── scheduler.rs       # RustTileScheduler (orchestrates cache + prefetch)
 ├── cache.rs           # moka tile cache (TinyLFU eviction)
 ├── prefetch.rs        # Viewport-based prefetching, rayon thread pool
@@ -109,7 +109,7 @@ All overridable in `config.py`:
 | `FASTPATH_TILE_CACHE_MB` | `12288` | Rust tile cache size (MB) |
 | `FASTPATH_PREFETCH_DISTANCE` | `3` | Tiles to prefetch ahead |
 | `FASTPATH_PYTHON_CACHE_SIZE` | `256` | Python-side LRU cache (tiles) |
-| `FASTPATH_VIPS_CONCURRENCY` | `8` | VIPS internal thread count |
+| `FASTPATH_VIPS_CONCURRENCY` | `24` | VIPS internal thread count |
 
 ## Windows Notes
 

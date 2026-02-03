@@ -75,11 +75,7 @@ def check_pyramid_status(pyramid_dir: Path) -> PyramidStatus:
         if not level_dirs:
             return PyramidStatus.INCOMPLETE
 
-        for level_dir in level_dirs:
-            tiles = list(level_dir.glob("*.jpg"))
-            if tiles:
-                break
-        else:
+        if not any(any(d.glob("*.jpg")) for d in level_dirs):
             return PyramidStatus.INCOMPLETE
 
         # Check thumbnail exists

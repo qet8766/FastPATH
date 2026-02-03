@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::error::TileResult;
+use crate::error::{TileError, TileResult};
 
 /// Information about a pyramid level.
 #[derive(Debug, Clone, Deserialize)]
@@ -30,8 +30,55 @@ impl SlideMetadata {
     pub fn load(fastpath_dir: &Path) -> TileResult<Self> {
         let metadata_path = fastpath_dir.join("metadata.json");
         let content = std::fs::read_to_string(&metadata_path)?;
-        let metadata: SlideMetadata = serde_json::from_str(&content)?;
+        let mut metadata: SlideMetadata = serde_json::from_str(&content)?;
+        metadata.validate()?;
         Ok(metadata)
+    }
+
+    /// Validate metadata fields and sort levels by level number.
+    fn validate(&mut self) -> TileResult<()> {
+        if self.dimensions.0 == 0 || self.dimensions.1 == 0 {
+            return Err(TileError::ValidationError(
+                "dimensions must be positive".into(),
+            ));
+        }
+        if self.tile_size == 0 {
+            return Err(TileError::ValidationError(
+                "tile_size must be positive".into(),
+            ));
+        }
+        if self.levels.is_empty() {
+            return Err(TileError::ValidationError(
+                "levels must not be empty".into(),
+            ));
+        }
+        for li in &self.levels {
+            if li.downsample == 0 {
+                return Err(TileError::ValidationError(
+                    format!("level {}: downsample must be positive", li.level),
+                ));
+            }
+            if li.cols == 0 {
+                return Err(TileError::ValidationError(
+                    format!("level {}: cols must be positive", li.level),
+                ));
+            }
+            if li.rows == 0 {
+                return Err(TileError::ValidationError(
+                    format!("level {}: rows must be positive", li.level),
+                ));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for li in &self.levels {
+            if !seen.insert(li.level) {
+                return Err(TileError::ValidationError(
+                    format!("duplicate level number: {}", li.level),
+                ));
+            }
+        }
+        self.levels.sort_by_key(|l| l.level);
+        Ok(())
     }
 
     /// Get level info by level number.
@@ -83,6 +130,27 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Build a valid SlideMetadata for testing. Tests can mutate fields before calling validate().
+    fn valid_metadata() -> SlideMetadata {
+        SlideMetadata {
+            dimensions: (1000, 2000),
+            tile_size: 512,
+            levels: vec![
+                LevelInfo { level: 0, downsample: 8, cols: 1, rows: 1 },
+                LevelInfo { level: 1, downsample: 4, cols: 2, rows: 4 },
+                LevelInfo { level: 2, downsample: 1, cols: 4, rows: 8 },
+            ],
+            target_mpp: 0.5,
+            target_magnification: 20.0,
+        }
+    }
+
+    /// Write metadata JSON to a temp dir and load it via SlideMetadata::load().
+    fn write_and_load(dir: &Path, json: &str) -> TileResult<SlideMetadata> {
+        fs::write(dir.join("metadata.json"), json).unwrap();
+        SlideMetadata::load(dir)
+    }
+
     #[test]
     fn test_dzsave_format_path() {
         let temp = TempDir::new().unwrap();
@@ -112,5 +180,103 @@ mod tests {
         let path = resolver.get_tile_path(0, 99, 99);
         assert!(path.is_some());
         assert!(path.unwrap().ends_with("tiles_files/0/99_99.jpg"));
+    }
+
+    #[test]
+    fn test_load_valid_metadata() {
+        let temp = TempDir::new().unwrap();
+        let json = r#"{
+            "dimensions": [1000, 2000],
+            "tile_size": 512,
+            "levels": [
+                {"level": 0, "downsample": 8, "cols": 1, "rows": 1},
+                {"level": 1, "downsample": 4, "cols": 2, "rows": 4},
+                {"level": 2, "downsample": 1, "cols": 4, "rows": 8}
+            ],
+            "target_mpp": 0.5,
+            "target_magnification": 20.0
+        }"#;
+        let metadata = write_and_load(temp.path(), json).unwrap();
+        assert_eq!(metadata.dimensions, (1000, 2000));
+        assert_eq!(metadata.num_levels(), 3);
+    }
+
+    #[test]
+    fn test_validate_empty_levels() {
+        let mut m = valid_metadata();
+        m.levels.clear();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("levels must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_zero_tile_size() {
+        let mut m = valid_metadata();
+        m.tile_size = 0;
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("tile_size must be positive"));
+    }
+
+    #[test]
+    fn test_validate_zero_dimensions() {
+        let mut m = valid_metadata();
+        m.dimensions = (0, 1000);
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("dimensions must be positive"));
+
+        let mut m = valid_metadata();
+        m.dimensions = (1000, 0);
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("dimensions must be positive"));
+    }
+
+    #[test]
+    fn test_validate_zero_downsample() {
+        let mut m = valid_metadata();
+        m.levels[1].downsample = 0;
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("level 1: downsample must be positive"));
+    }
+
+    #[test]
+    fn test_validate_zero_cols() {
+        let mut m = valid_metadata();
+        m.levels[2].cols = 0;
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("level 2: cols must be positive"));
+    }
+
+    #[test]
+    fn test_validate_zero_rows() {
+        let mut m = valid_metadata();
+        m.levels[0].rows = 0;
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("level 0: rows must be positive"));
+    }
+
+    #[test]
+    fn test_validate_duplicate_levels() {
+        let mut m = valid_metadata();
+        m.levels[2].level = 1; // duplicate of levels[1]
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate level number: 1"));
+    }
+
+    #[test]
+    fn test_validate_sorts_levels() {
+        let mut m = SlideMetadata {
+            dimensions: (1000, 2000),
+            tile_size: 512,
+            levels: vec![
+                LevelInfo { level: 2, downsample: 1, cols: 4, rows: 8 },
+                LevelInfo { level: 0, downsample: 8, cols: 1, rows: 1 },
+                LevelInfo { level: 1, downsample: 4, cols: 2, rows: 4 },
+            ],
+            target_mpp: 0.5,
+            target_magnification: 20.0,
+        };
+        m.validate().unwrap();
+        let level_nums: Vec<u32> = m.levels.iter().map(|l| l.level).collect();
+        assert_eq!(level_nums, vec![0, 1, 2]);
     }
 }
