@@ -269,45 +269,6 @@ class TestRustTileScheduler:
 class TestRustSchedulerComparisonWithPython:
     """Tests comparing Rust scheduler output with Python SlideManager."""
 
-    def test_same_tile_data(self, mock_fastpath_dir: Path, qapp):
-        """Test that Rust and Python schedulers return equivalent tile data."""
-        from fastpath.core.slide import SlideManager
-
-        # Load with both schedulers
-        rust_scheduler = RustTileScheduler()
-        rust_scheduler.load(str(mock_fastpath_dir))
-
-        python_manager = SlideManager()
-        python_manager.load(str(mock_fastpath_dir))
-
-        # Get the same tile from both
-        rust_tile = rust_scheduler.get_tile(0, 0, 0)
-        python_tile = python_manager.getTile(0, 0, 0)
-
-        assert rust_tile is not None
-        assert python_tile is not None
-
-        rust_data, rust_w, rust_h = rust_tile
-
-        # Python returns QImage, convert to raw bytes for comparison
-        python_tile = python_tile.convertToFormat(python_tile.Format.Format_RGB888)
-        python_w = python_tile.width()
-        python_h = python_tile.height()
-
-        # Dimensions should match
-        assert rust_w == python_w
-        assert rust_h == python_h
-
-        # Extract pixel data accounting for QImage stride padding
-        # (Qt aligns rows to 4-byte boundaries, so constBits() may include padding)
-        stride = python_tile.bytesPerLine()
-        row_bytes = python_w * 3  # RGB888 = 3 bytes per pixel
-        raw = python_tile.constBits().tobytes()
-        python_data = b"".join(
-            raw[r * stride : r * stride + row_bytes] for r in range(python_h)
-        )
-        assert len(rust_data) == len(python_data)
-
     def test_metadata_consistency(self, mock_fastpath_dir: Path, qapp):
         """Test that metadata is consistent between Rust and Python."""
         from fastpath.core.slide import SlideManager

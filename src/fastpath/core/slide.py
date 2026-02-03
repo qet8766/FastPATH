@@ -4,26 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
-from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
-from PySide6.QtGui import QImage
 
-from fastpath.config import PYTHON_TILE_CACHE_SIZE, DEFAULT_TILE_SIZE
-from fastpath.core.types import TileCoord, LevelInfo
+from fastpath.config import DEFAULT_TILE_SIZE
+from fastpath.core.types import LevelInfo
 
 logger = logging.getLogger(__name__)
-
-# Import backends first to set up DLL paths on Windows
-from fastpath.preprocess.backends import VIPSBackend, is_vips_available
-
-# Import pyvips after DLL setup
-try:
-    import pyvips
-except (ImportError, OSError):
-    pyvips = None
 
 
 class SlideManager(QObject):
@@ -42,12 +30,6 @@ class SlideManager(QObject):
         self._fastpath_dir: Path | None = None
         self._metadata: dict | None = None
         self._levels: list[LevelInfo] = []
-        # Use OrderedDict for LRU cache behavior
-        self._tile_cache: OrderedDict[TileCoord, QImage] = OrderedDict()
-        self._cache_size = PYTHON_TILE_CACHE_SIZE
-        self._cache_lock = threading.Lock()  # Thread safety for cache access
-        self._cache_hits = 0
-        self._cache_misses = 0
 
     @Slot(str)
     def load(self, path: str) -> bool:
@@ -89,7 +71,6 @@ class SlideManager(QObject):
             self._fastpath_dir = path
             self._levels = levels
 
-            self._tile_cache.clear()
             self.slideLoaded.emit()
             return True
         except json.JSONDecodeError as e:
@@ -105,7 +86,6 @@ class SlideManager(QObject):
         self._fastpath_dir = None
         self._metadata = None
         self._levels = []
-        self._tile_cache.clear()
         self.slideClosed.emit()
 
     @Property(bool, notify=slideLoaded)
@@ -306,113 +286,6 @@ class SlideManager(QObject):
 
         tile_path = self._get_tile_path_internal(level, col, row)
         return str(tile_path) if tile_path else ""
-
-    def _cache_get(self, coord: TileCoord) -> QImage | None:
-        """Thread-safe LRU cache lookup.
-
-        Returns:
-            Cached QImage or None on miss.
-        """
-        with self._cache_lock:
-            if coord in self._tile_cache:
-                self._tile_cache.move_to_end(coord)
-                self._cache_hits += 1
-                return self._tile_cache[coord]
-            self._cache_misses += 1
-        return None
-
-    def _cache_put(self, coord: TileCoord, image: QImage) -> None:
-        """Thread-safe LRU cache insertion with eviction."""
-        with self._cache_lock:
-            if coord not in self._tile_cache:
-                if len(self._tile_cache) >= self._cache_size:
-                    self._tile_cache.popitem(last=False)
-                self._tile_cache[coord] = image
-
-    def _load_tile_from_disk(self, tile_path: Path) -> QImage | None:
-        """Load a tile image from disk, trying pyvips first with QImage fallback.
-
-        Args:
-            tile_path: Path to the JPEG tile file.
-
-        Returns:
-            QImage in RGB888 format, or None on failure.
-        """
-        if is_vips_available():
-            vips_img = pyvips.Image.new_from_file(str(tile_path), access="sequential")
-            if vips_img.bands == 4:
-                vips_img = vips_img.extract_band(0, n=3)
-            elif vips_img.bands == 1:
-                vips_img = vips_img.bandjoin([vips_img, vips_img])
-
-            data = vips_img.write_to_memory()
-            qimage = QImage(
-                data,
-                vips_img.width,
-                vips_img.height,
-                vips_img.width * 3,
-                QImage.Format.Format_RGB888,
-            )
-            # Copy — the pyvips data buffer goes out of scope after this method returns
-            return qimage.copy()
-        else:
-            qimage = QImage(str(tile_path))
-            if qimage.isNull():
-                return None
-            return qimage.convertToFormat(QImage.Format.Format_RGB888)
-
-    def get_cache_stats(self) -> dict:
-        """Return cache hit/miss counts for diagnostics."""
-        with self._cache_lock:
-            return {
-                "hits": self._cache_hits,
-                "misses": self._cache_misses,
-                "size": len(self._tile_cache),
-                "capacity": self._cache_size,
-            }
-
-    def getTile(self, level: int, col: int, row: int) -> QImage | None:
-        """Get a tile as a QImage.
-
-        Uses thread-safe LRU cache for performance.
-
-        Args:
-            level: Pyramid level
-            col: Column index
-            row: Row index
-
-        Returns:
-            QImage or None if tile doesn't exist
-        """
-        if not self._fastpath_dir:
-            return None
-
-        coord = TileCoord(level, col, row)
-
-        cached = self._cache_get(coord)
-        if cached is not None:
-            return cached
-
-        # Load from disk (outside lock — I/O can be slow)
-        tile_path = self._get_tile_path_internal(level, col, row)
-        if tile_path is None:
-            return None
-
-        try:
-            qimage = self._load_tile_from_disk(tile_path)
-            if qimage is None:
-                return None
-            self._cache_put(coord, qimage)
-            return qimage
-        except FileNotFoundError:
-            logger.debug("Tile not found: (%d, %d, %d) at %s", level, col, row, tile_path)
-            return None
-        except OSError as e:
-            logger.warning("I/O error loading tile (%d, %d, %d) from %s: %s", level, col, row, tile_path, e)
-            return None
-        except Exception as e:
-            logger.warning("Unexpected error loading tile (%d, %d, %d) from %s: %s", level, col, row, tile_path, e)
-            return None
 
     @Slot(result=str)
     def getThumbnailPath(self) -> str:

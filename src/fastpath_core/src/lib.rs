@@ -16,7 +16,7 @@ mod scheduler;
 mod slide_pool;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 
 use scheduler::TileScheduler;
 
@@ -98,9 +98,15 @@ impl RustTileScheduler {
     ///
     /// Returns:
     ///     Tuple of (bytes, width, height) or None if tile doesn't exist
-    fn get_tile(&self, level: u32, col: u32, row: u32) -> Option<(Vec<u8>, u32, u32)> {
+    fn get_tile<'py>(
+        &self,
+        py: Python<'py>,
+        level: u32,
+        col: u32,
+        row: u32,
+    ) -> Option<(Bound<'py, PyBytes>, u32, u32)> {
         self.inner.get_tile(level, col, row).map(|tile| {
-            (tile.data.to_vec(), tile.width, tile.height)
+            (PyBytes::new(py, &tile.data), tile.width, tile.height)
         })
     }
 

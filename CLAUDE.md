@@ -67,13 +67,12 @@ _slide_manager.load()          # 3. Emits slideLoaded → QML requests tiles
 ```
 If SlideManager loads first, `slideLoaded` triggers QML tile requests before the cache is populated → gray tiles.
 
-### Three-tier cache architecture
+### Two-tier Rust cache architecture
 
 Tile lookup order: **L1 → L2 → disk**.
 
 1. **L1 — Rust moka** (4GB default) — decoded RGB tiles, concurrent TinyLFU eviction, cleared on slide switch
 2. **L2 — Rust moka** (compressed JPEG bytes) — persists across slide switches, keyed by `SlideTileCoord` (includes `slide_id` hash). L2 hits decode JPEG (~2ms) and promote to L1, replacing ~5-10ms disk reads for previously-viewed slides
-3. **Python OrderedDict** (256 tiles default) — tertiary LRU in `SlideManager`, keyed by `TileCoord`
 
 Every disk read writes through to L2 as a side effect. L2 is never cleared — tiles from different slides coexist via `slide_id` scoping. `filter_cached_tiles()` counts L2 entries as "available" for the cache miss threshold.
 
@@ -133,7 +132,6 @@ All overridable in `config.py`:
 | `FASTPATH_L1_CACHE_MB` | `4096` | Rust L1 tile cache size in MB (decoded RGB) |
 | `FASTPATH_L2_CACHE_MB` | `32768` | Rust L2 compressed cache size in MB (JPEG bytes) |
 | `FASTPATH_PREFETCH_DISTANCE` | `3` | Tiles to prefetch ahead |
-| `FASTPATH_PYTHON_CACHE_SIZE` | `256` | Python-side LRU cache (tiles) |
 | `FASTPATH_VIPS_CONCURRENCY` | `24` | VIPS internal thread count |
 | `FASTPATH_TILE_TIMING` | unset | Set to `1` for per-tile disk/decode/total timing on stderr |
 

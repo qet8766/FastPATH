@@ -58,15 +58,6 @@ class TestSlideManagerErrors:
         assert result is False
         assert not manager.isLoaded
 
-    def test_get_tile_nonexistent_returns_none(self, qapp, mock_fastpath_dir: Path):
-        """getTile for non-existent tile should return None, not crash."""
-        manager = SlideManager()
-        manager.load(str(mock_fastpath_dir))
-
-        # Request a tile that doesn't exist
-        tile = manager.getTile(0, 999, 999)
-        assert tile is None
-
 
 class TestAnnotationManagerErrors:
     """Tests for AnnotationManager error handling."""
@@ -132,36 +123,6 @@ class TestProjectManagerErrors:
 class TestThreadSafety:
     """Tests for thread safety of concurrent operations."""
 
-    def test_tile_cache_concurrent_access(self, qapp, mock_fastpath_dir: Path):
-        """Multiple threads accessing cache should not corrupt it."""
-        manager = SlideManager()
-        manager.load(str(mock_fastpath_dir))
-
-        errors = []
-        tiles_loaded = []
-
-        def worker():
-            try:
-                for _ in range(50):
-                    level = 0
-                    col = random.randint(0, 3)
-                    row = random.randint(0, 3)
-                    tile = manager.getTile(level, col, row)
-                    if tile is not None:
-                        tiles_loaded.append((level, col, row))
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=worker) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(errors) == 0, f"Thread errors: {errors}"
-        # Should have loaded some tiles successfully
-        assert len(tiles_loaded) > 0
-
     def test_annotation_rtree_concurrent_access(self, qapp):
         """Multiple threads modifying annotations should not crash."""
         manager = AnnotationManager()
@@ -203,39 +164,6 @@ class TestThreadSafety:
         assert len(errors) == 0, f"Thread errors: {errors}"
         # Should have completed operations
         assert len(operations) > 0
-
-
-class TestLRUCache:
-    """Tests for LRU cache behavior."""
-
-    def test_lru_eviction_order(self, qapp, mock_fastpath_dir: Path):
-        """Cache should evict least recently used tiles."""
-        manager = SlideManager()
-        manager._cache_size = 4  # Small cache for testing
-        manager.load(str(mock_fastpath_dir))
-
-        # Load tiles A, B, C, D
-        manager.getTile(0, 0, 0)  # A
-        manager.getTile(0, 1, 0)  # B
-        manager.getTile(0, 2, 0)  # C
-        manager.getTile(0, 3, 0)  # D
-
-        # Access A again (should move to end, making B the oldest)
-        manager.getTile(0, 0, 0)  # A accessed again
-
-        # Load a new tile E - should evict B (oldest)
-        manager.getTile(0, 0, 1)  # E
-
-        # Check cache contents
-        from fastpath.core.slide import TileCoord
-
-        with manager._cache_lock:
-            cache_keys = list(manager._tile_cache.keys())
-
-        # B should have been evicted (coord 0,1,0)
-        assert TileCoord(0, 1, 0) not in cache_keys
-        # A should still be in cache
-        assert TileCoord(0, 0, 0) in cache_keys
 
 
 class TestRTreeIntegerIds:
