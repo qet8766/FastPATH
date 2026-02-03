@@ -241,9 +241,16 @@ impl RustTileScheduler {
     }
 }
 
+/// Whether the Rust extension was compiled without optimizations (debug build).
+#[pyfunction]
+fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// FastPATH Core - High-performance tile scheduler for WSI viewing.
 #[pymodule]
 fn fastpath_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustTileScheduler>()?;
+    m.add_function(wrap_pyfunction!(is_debug_build, m)?)?;
     Ok(())
 }

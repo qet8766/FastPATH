@@ -13,12 +13,13 @@ ApplicationWindow {
     minimumWidth: 800
     minimumHeight: 600
     title: {
+        let suffix = IsDebugBuild ? " [DEBUG BUILD]" : ""
         if (preprocessMode) {
-            return "FastPATH - Preprocess"
+            return "FastPATH - Preprocess" + suffix
         } else if (SlideManager.isLoaded) {
-            return SlideManager.sourceFile + " - FastPATH"
+            return SlideManager.sourceFile + " - FastPATH" + suffix
         }
-        return "FastPATH"
+        return "FastPATH" + suffix
     }
     color: Theme.background
 
@@ -548,6 +549,24 @@ ApplicationWindow {
                 }
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontSizeSmall
+            }
+
+            Rectangle {
+                visible: IsDebugBuild
+                color: "#cc0000"
+                radius: 2
+                implicitWidth: debugLabel.implicitWidth + 8
+                implicitHeight: debugLabel.implicitHeight + 2
+                Layout.alignment: Qt.AlignVCenter
+
+                Label {
+                    id: debugLabel
+                    anchors.centerIn: parent
+                    text: "DEBUG BUILD"
+                    color: "#ffffff"
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
             }
 
             Item { Layout.fillWidth: true }

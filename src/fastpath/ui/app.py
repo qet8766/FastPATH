@@ -23,7 +23,7 @@ from fastpath.ui.models import TileModel, RecentFilesModel
 from fastpath.ui.navigator import SlideNavigator
 from fastpath.ui.settings import Settings
 from fastpath.ui.preprocess import PreprocessController
-from fastpath_core import RustTileScheduler
+from fastpath_core import RustTileScheduler, is_debug_build
 
 logger = logging.getLogger(__name__)
 
@@ -617,6 +617,7 @@ def run_app(args: list[str] | None = None) -> int:
     engine.rootContext().setContextProperty("PluginManager", plugin_manager)
     engine.rootContext().setContextProperty("Navigator", controller.navigator)
     engine.rootContext().setContextProperty("CacheStats", cache_stats_provider)
+    engine.rootContext().setContextProperty("IsDebugBuild", is_debug_build())
 
     # Load QML
     qml_dir = Path(__file__).parent / "qml"
