@@ -267,9 +267,17 @@ impl PrefetchCalculator {
         let level_tile_size = (tile_size * level_info.downsample) as f64;
 
         let col_start = ((x / level_tile_size).floor() as i32).max(0) as u32;
-        let col_end = (((x + width) / level_tile_size).ceil() as u32).min(level_info.cols);
+        let col_end = (((x + width) / level_tile_size).ceil() as i32).max(0) as u32;
+        let col_end = col_end.min(level_info.cols);
         let row_start = ((y / level_tile_size).floor() as i32).max(0) as u32;
-        let row_end = (((y + height) / level_tile_size).ceil() as u32).min(level_info.rows);
+        let row_end = (((y + height) / level_tile_size).ceil() as i32).max(0) as u32;
+        let row_end = row_end.min(level_info.rows);
+
+        // Viewport may be entirely outside slide bounds (e.g. extended prefetch
+        // rect during fast panning) — col_start > col_end is possible.
+        if col_end <= col_start || row_end <= row_start {
+            return Vec::new();
+        }
 
         let mut tiles = Vec::with_capacity(
             ((col_end - col_start) * (row_end - row_start)) as usize,
@@ -385,5 +393,41 @@ mod tests {
         // No tiles cached
         let tiles = calc.prefetch_tiles(&metadata, &viewport, &|_| false);
         assert!(!tiles.is_empty());
+    }
+
+    #[test]
+    fn test_viewport_past_slide_bounds_no_panic() {
+        let calc = PrefetchCalculator::new(PrefetchConfig::default());
+        let metadata = test_metadata();
+
+        // Viewport entirely past the right edge of the slide
+        // level 2 (ds=1): cols=20, tile_size=512 → slide width in pixels = 10240
+        // x=15000 is past the edge → col_start > cols → should return empty, not panic
+        let viewport = Viewport::new(15000.0, 15000.0, 1024.0, 1024.0, 1.0, 0.0, 0.0);
+        let tiles = calc.visible_tiles(&metadata, &viewport);
+        assert!(tiles.is_empty());
+
+        // Viewport with negative coordinates (extended prefetch can produce these)
+        let viewport_neg = Viewport::new(-5000.0, -5000.0, 1024.0, 1024.0, 1.0, 0.0, 0.0);
+        let tiles = calc.visible_tiles(&metadata, &viewport_neg);
+        assert!(tiles.is_empty());
+    }
+
+    #[test]
+    fn test_velocity_prefetch_past_bounds_no_panic() {
+        let calc = PrefetchCalculator::new(PrefetchConfig {
+            tiles_ahead: 3,
+            tiles_around: 1,
+            prefetch_levels: true,
+            min_velocity: 50.0,
+        });
+        let metadata = test_metadata();
+
+        // Viewport near the right edge, moving right with high velocity
+        // The extended viewport will extend past slide bounds
+        let viewport = Viewport::new(9500.0, 9500.0, 1024.0, 1024.0, 1.0, 500.0, 500.0);
+        let tiles = calc.prefetch_tiles(&metadata, &viewport, &|_| false);
+        // Should not panic; may return some tiles from the visible portion
+        assert!(tiles.iter().all(|t| t.col < 20 && t.row < 20));
     }
 }

@@ -132,7 +132,6 @@ impl TileCache {
 /// Used by `CompressedTileCache` (L2) so tiles from multiple slides
 /// can coexist in the same cache without collisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub struct SlideTileCoord {
     pub slide_id: u64,
     pub level: u32,
@@ -140,7 +139,6 @@ pub struct SlideTileCoord {
     pub row: u32,
 }
 
-#[allow(dead_code)]
 impl SlideTileCoord {
     pub fn new(slide_id: u64, level: u32, col: u32, row: u32) -> Self {
         Self {
@@ -156,7 +154,6 @@ impl SlideTileCoord {
 ///
 /// Uses `DefaultHasher` (SipHash-2-4). Not stable across Rust versions,
 /// but that's fine — the L2 cache is in-memory only, no persistence.
-#[allow(dead_code)]
 pub fn compute_slide_id(path: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
@@ -167,14 +164,12 @@ pub fn compute_slide_id(path: &str) -> u64 {
 ///
 /// Unlike `TileCache` (L1), this cache is **not** cleared on slide switch.
 /// Tiles from different slides are disambiguated by `SlideTileCoord.slide_id`.
-#[allow(dead_code)]
 pub struct CompressedTileCache {
     inner: Cache<SlideTileCoord, CompressedTileData>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
-#[allow(dead_code)]
 impl CompressedTileCache {
     /// Create a new compressed tile cache with the given size limit in megabytes.
     pub fn new(max_size_mb: usize) -> Self {
@@ -193,6 +188,8 @@ impl CompressedTileCache {
     }
 
     /// Get a compressed tile from the cache.
+    /// Used by L2 cache reads (Part 4) and tests.
+    #[allow(dead_code)]
     pub fn get(&self, coord: &SlideTileCoord) -> Option<CompressedTileData> {
         if let Some(tile) = self.inner.get(coord) {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -209,6 +206,8 @@ impl CompressedTileCache {
     }
 
     /// Check if a compressed tile is in the cache.
+    /// Used by L2 cache reads (Part 4) and tests.
+    #[allow(dead_code)]
     pub fn contains(&self, coord: &SlideTileCoord) -> bool {
         self.inner.contains_key(coord)
     }
@@ -240,6 +239,7 @@ impl CompressedTileCache {
     }
 
     /// Check if cache is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.entry_count() == 0
     }

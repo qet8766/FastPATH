@@ -18,13 +18,17 @@ use pyo3::types::PyDict;
 
 use scheduler::TileScheduler;
 
-/// Python-exposed tile scheduler.
+/// Python-exposed tile scheduler with two-level caching.
+///
+/// L1 cache holds decoded RGB tile data (fast, large).
+/// L2 cache holds compressed JPEG bytes (persists across slide switches).
 ///
 /// Usage:
 /// ```python
 /// from fastpath_core import RustTileScheduler
 ///
-/// scheduler = RustTileScheduler(cache_size_mb=12288, prefetch_distance=3)
+/// scheduler = RustTileScheduler(cache_size_mb=12288, l2_cache_size_mb=32768,
+///                               prefetch_distance=3)
 /// scheduler.load("/path/to/slide.fastpath")
 ///
 /// # Get a tile (returns (bytes, width, height) or None)
@@ -34,9 +38,9 @@ use scheduler::TileScheduler;
 /// scheduler.update_viewport(x=100, y=200, width=800, height=600,
 ///                          scale=0.5, velocity_x=10.0, velocity_y=0.0)
 ///
-/// # Get cache statistics
+/// # Get cache statistics (includes L1 and L2 keys)
 /// stats = scheduler.cache_stats()
-/// print(f"Cache hits: {stats['hits']}, misses: {stats['misses']}")
+/// print(f"L1 hits: {stats['hits']}, L2 tiles: {stats['l2_num_tiles']}")
 ///
 /// scheduler.close()
 /// ```
@@ -50,13 +54,16 @@ impl RustTileScheduler {
     /// Create a new tile scheduler.
     ///
     /// Args:
-    ///     cache_size_mb: Maximum cache size in megabytes (default: 12288 = 12GB)
+    ///     cache_size_mb: Maximum L1 cache size in megabytes (default: 12288 = 12GB).
+    ///         Holds decoded RGB tile data.
+    ///     l2_cache_size_mb: Maximum L2 cache size in megabytes (default: 32768 = 32GB).
+    ///         Holds compressed JPEG bytes; persists across slide switches.
     ///     prefetch_distance: Number of tiles to prefetch ahead (default: 3)
     #[new]
-    #[pyo3(signature = (cache_size_mb=12288, prefetch_distance=3))]
-    fn new(cache_size_mb: usize, prefetch_distance: u32) -> Self {
+    #[pyo3(signature = (cache_size_mb=12288, l2_cache_size_mb=32768, prefetch_distance=3))]
+    fn new(cache_size_mb: usize, l2_cache_size_mb: usize, prefetch_distance: u32) -> Self {
         Self {
-            inner: TileScheduler::new(cache_size_mb, prefetch_distance),
+            inner: TileScheduler::new(cache_size_mb, l2_cache_size_mb, prefetch_distance),
         }
     }
 
@@ -133,18 +140,26 @@ impl RustTileScheduler {
         self.inner.prefetch_low_res_levels();
     }
 
-    /// Get cache statistics.
+    /// Get cache statistics for both L1 and L2 caches.
     ///
     /// Returns:
-    ///     Dict with keys: hits, misses, size_bytes, num_tiles
+    ///     Dict with L1 keys: hits, misses, hit_ratio, size_bytes, num_tiles
+    ///     and L2 keys: l2_hits, l2_misses, l2_hit_ratio, l2_size_bytes, l2_num_tiles
     fn cache_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let stats = self.inner.cache_stats();
         let dict = PyDict::new(py);
-        dict.set_item("hits", stats.hits)?;
-        dict.set_item("misses", stats.misses)?;
-        dict.set_item("hit_ratio", stats.hit_ratio)?;
-        dict.set_item("size_bytes", stats.size_bytes)?;
-        dict.set_item("num_tiles", stats.num_tiles)?;
+        // L1 keys (backward-compatible)
+        dict.set_item("hits", stats.l1.hits)?;
+        dict.set_item("misses", stats.l1.misses)?;
+        dict.set_item("hit_ratio", stats.l1.hit_ratio)?;
+        dict.set_item("size_bytes", stats.l1.size_bytes)?;
+        dict.set_item("num_tiles", stats.l1.num_tiles)?;
+        // L2 keys
+        dict.set_item("l2_hits", stats.l2.hits)?;
+        dict.set_item("l2_misses", stats.l2.misses)?;
+        dict.set_item("l2_hit_ratio", stats.l2.hit_ratio)?;
+        dict.set_item("l2_size_bytes", stats.l2.size_bytes)?;
+        dict.set_item("l2_num_tiles", stats.l2.num_tiles)?;
         Ok(dict)
     }
 

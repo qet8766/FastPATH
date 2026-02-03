@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
@@ -19,11 +20,23 @@ const MAX_VISIBLE_TILES: usize = 256;
 /// the visible area, covering ~32 tiles for a typical viewport perimeter.
 const EXTENDED_TILE_BUDGET: usize = 32;
 
-use crate::cache::{CacheStats, TileCache, TileCoord};
-use crate::decoder::{decode_tile, TileData};
+use crate::cache::{CacheStats, CompressedTileCache, SlideTileCoord, TileCache, TileCoord, compute_slide_id};
+use crate::decoder::{decode_jpeg_bytes, read_jpeg_bytes, TileData};
 use crate::error::{TileError, TileResult};
 use crate::format::{SlideMetadata, TilePathResolver};
 use crate::prefetch::{PrefetchCalculator, PrefetchConfig, Viewport};
+
+/// Combined L1 + L2 cache statistics.
+#[derive(Debug, Clone, Default)]
+pub struct CombinedCacheStats {
+    pub l1: CacheStats,
+    pub l2: CacheStats,
+}
+
+/// Check if per-tile timing instrumentation is enabled via env var.
+fn tile_timing_enabled() -> bool {
+    std::env::var("FASTPATH_TILE_TIMING").is_ok_and(|v| v == "1" || v == "true")
+}
 
 /// Internal slide state.
 struct SlideState {
@@ -33,8 +46,10 @@ struct SlideState {
 
 /// High-performance tile scheduler with caching and prefetching.
 pub struct TileScheduler {
-    /// Tile cache.
+    /// L1 tile cache (decoded RGB).
     cache: Arc<TileCache>,
+    /// L2 compressed tile cache (JPEG bytes, persists across slide switches).
+    l2_cache: Arc<CompressedTileCache>,
     /// Currently loaded slide state.
     slide: RwLock<Option<SlideState>>,
     /// Prefetch calculator.
@@ -43,16 +58,22 @@ pub struct TileScheduler {
     in_flight: Mutex<HashSet<TileCoord>>,
     /// Monotonic counter bumped on load()/close() to invalidate stale prefetch batches.
     generation: AtomicU64,
+    /// Hash of the current slide path (0 = no slide loaded).
+    active_slide_id: AtomicU64,
+    /// Whether per-tile timing is enabled (cached from FASTPATH_TILE_TIMING env var).
+    tile_timing: bool,
 }
 
 impl TileScheduler {
     /// Create a new scheduler.
     ///
     /// # Arguments
-    /// * `cache_size_mb` - Maximum cache size in megabytes
+    /// * `cache_size_mb` - Maximum L1 cache size in megabytes (decoded RGB tiles)
+    /// * `l2_cache_size_mb` - Maximum L2 cache size in megabytes (compressed JPEG bytes)
     /// * `prefetch_distance` - Number of tiles to prefetch ahead
-    pub fn new(cache_size_mb: usize, prefetch_distance: u32) -> Self {
+    pub fn new(cache_size_mb: usize, l2_cache_size_mb: usize, prefetch_distance: u32) -> Self {
         let cache = Arc::new(TileCache::new(cache_size_mb));
+        let l2_cache = Arc::new(CompressedTileCache::new(l2_cache_size_mb));
 
         let prefetch_config = PrefetchConfig {
             tiles_ahead: prefetch_distance,
@@ -62,26 +83,34 @@ impl TileScheduler {
 
         Self {
             cache,
+            l2_cache,
             slide: RwLock::new(None),
             prefetch_calc,
             in_flight: Mutex::new(HashSet::new()),
             generation: AtomicU64::new(0),
+            active_slide_id: AtomicU64::new(0),
+            tile_timing: tile_timing_enabled(),
         }
     }
 
     /// Load a .fastpath directory.
     pub fn load(&self, path: &str) -> TileResult<()> {
-        let path = PathBuf::from(path);
+        let path_buf = PathBuf::from(path);
 
-        if !path.exists() {
+        if !path_buf.exists() {
             return Err(TileError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Path does not exist: {}", path.display()),
+                format!("Path does not exist: {}", path_buf.display()),
             )));
         }
 
-        let metadata = SlideMetadata::load(&path)?;
-        let resolver = TilePathResolver::new(path)?;
+        // Canonicalize for stable slide_id on Windows
+        // (C:\slides\foo vs C:/slides/foo vs c:\SLIDES\FOO → same ID)
+        let canonical = path_buf.canonicalize().map_err(TileError::Io)?;
+        let slide_id = compute_slide_id(&canonical.to_string_lossy().to_lowercase());
+
+        let metadata = SlideMetadata::load(&path_buf)?;
+        let resolver = TilePathResolver::new(path_buf)?;
 
         // Invalidate in-flight prefetch work before clearing cache.
         // Bump generation first so workers see the change before the cache is cleared,
@@ -89,10 +118,12 @@ impl TileScheduler {
         self.generation.fetch_add(1, Ordering::Release);
         self.in_flight.lock().clear();
         self.cache.clear();
+        // L2 is NOT cleared — persists across slide switches
 
         let mut slide = self.slide.write();
         *slide = Some(SlideState { metadata, resolver });
 
+        self.active_slide_id.store(slide_id, Ordering::Release);
         Ok(())
     }
 
@@ -103,6 +134,8 @@ impl TileScheduler {
         let mut slide = self.slide.write();
         *slide = None;
         self.cache.clear();
+        // L2 is NOT cleared — persists across slide switches
+        self.active_slide_id.store(0, Ordering::Release);
     }
 
     /// Check if a slide is loaded.
@@ -137,7 +170,7 @@ impl TileScheduler {
             .unwrap_or((0, 0))
     }
 
-    /// Decode a tile from disk and insert it into the cache.
+    /// Read, compress-cache (L2), decode, and insert a tile into L1.
     ///
     /// Called only from foreground `get_tile()` — does NOT use in-flight dedup.
     /// The caller has already checked the cache, so we decode unconditionally.
@@ -146,14 +179,51 @@ impl TileScheduler {
     /// returning `None` to QML (which would cache a placeholder permanently).
     /// Background prefetch dedup is handled separately in `load_tile_for_prefetch()`.
     fn load_tile_into_cache(&self, coord: &TileCoord, path: &std::path::Path) -> Option<TileData> {
-        match decode_tile(path) {
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
+        let t0 = if self.tile_timing { Some(Instant::now()) } else { None };
+
+        // Step 1: Read compressed JPEG from disk
+        let compressed = match read_jpeg_bytes(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    coord.level, coord.col, coord.row, path, e
+                );
+                return None;
+            }
+        };
+        let t_read = t0.map(|t| t.elapsed());
+
+        // Step 2: Insert into L2 (side effect, O(1) Bytes clone)
+        if slide_id != 0 {
+            let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+            self.l2_cache.insert(l2_coord, compressed.clone());
+        }
+        let t_l2 = t0.map(|t| t.elapsed());
+
+        // Step 3: Decode JPEG → RGB, insert into L1
+        match decode_jpeg_bytes(&compressed) {
             Ok(tile) => {
+                let t_decode = t0.map(|t| t.elapsed());
                 self.cache.insert(*coord, tile.clone());
+
+                if let Some(t) = t0 {
+                    let total = t.elapsed();
+                    eprintln!(
+                        "[TILE TIMING] {}/{}_{}  disk={:.2?} l2={:.2?} decode={:.2?} total={:.2?}",
+                        coord.level, coord.col, coord.row,
+                        t_read.unwrap(),
+                        t_l2.unwrap() - t_read.unwrap(),
+                        t_decode.unwrap() - t_l2.unwrap(),
+                        total
+                    );
+                }
                 Some(tile)
             }
             Err(e) => {
                 eprintln!(
-                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    "[TILE ERROR] decode {}/{}_{}; path={:?}: {:?}",
                     coord.level, coord.col, coord.row, path, e
                 );
                 None
@@ -166,19 +236,26 @@ impl TileScheduler {
     /// Three generation checks prevent inserting tiles from an old slide:
     /// 1. Before claiming in-flight — quick exit without locking
     /// 2. After claiming — catches races where load() ran between check #1 and lock
-    /// 3. Before cache insert — the critical guard after the ~5-10ms decode
+    /// 3. Before L1 cache insert — the critical guard after the ~5-10ms decode
+    ///
+    /// L2 insert is guarded by slide_id consistency: only insert if the current
+    /// slide_id still matches what we captured at the start, preventing stale
+    /// prefetch threads from filing data under a new slide's ID.
     fn load_tile_for_prefetch(
         &self,
         coord: &TileCoord,
         path: &std::path::Path,
         batch_generation: u64,
     ) -> Option<TileData> {
+        // Capture slide_id + generation together at the start
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
+
         // Check 1: quick exit before touching the in-flight set
         if self.generation.load(Ordering::Acquire) != batch_generation {
             return None;
         }
 
-        // Fast path — tile already cached
+        // Fast path — tile already cached in L1
         if let Some(tile) = self.cache.get(coord) {
             return Some(tile);
         }
@@ -197,7 +274,30 @@ impl TileScheduler {
             }
         }
 
-        let result = match decode_tile(path) {
+        // Step 1: Read compressed JPEG from disk
+        let compressed = match read_jpeg_bytes(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    coord.level, coord.col, coord.row, path, e
+                );
+                self.clear_in_flight_for_generation(coord, batch_generation);
+                return None;
+            }
+        };
+
+        // Step 2: L2 insert — guarded by slide_id consistency
+        // Only insert if the current slide_id still matches what we captured,
+        // preventing stale prefetch threads from filing data under wrong slide
+        let current_slide_id = self.active_slide_id.load(Ordering::Acquire);
+        if slide_id != 0 && current_slide_id == slide_id {
+            let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+            self.l2_cache.insert(l2_coord, compressed.clone());
+        }
+
+        // Step 3: Decode JPEG → RGB + L1 insert (generation-guarded)
+        let result = match decode_jpeg_bytes(&compressed) {
             Ok(tile) => {
                 // Check 3: generation may have changed during decode
                 if self.generation.load(Ordering::Acquire) != batch_generation {
@@ -209,7 +309,7 @@ impl TileScheduler {
             }
             Err(e) => {
                 eprintln!(
-                    "[TILE ERROR] {}/{}_{}; path={:?}: {:?}",
+                    "[TILE ERROR] decode {}/{}_{}; path={:?}: {:?}",
                     coord.level, coord.col, coord.row, path, e
                 );
                 None
@@ -427,14 +527,18 @@ impl TileScheduler {
             .collect()
     }
 
-    /// Get cache statistics.
-    pub fn cache_stats(&self) -> CacheStats {
-        self.cache.stats()
+    /// Get combined L1 + L2 cache statistics.
+    pub fn cache_stats(&self) -> CombinedCacheStats {
+        CombinedCacheStats {
+            l1: self.cache.stats(),
+            l2: self.l2_cache.stats(),
+        }
     }
 
-    /// Reset cache hit/miss counters to zero.
+    /// Reset cache hit/miss counters to zero (both L1 and L2).
     pub fn reset_cache_stats(&self) {
         self.cache.reset_stats();
+        self.l2_cache.reset_stats();
     }
 
     /// Get metadata for Python access.
@@ -492,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_creation() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         assert!(!scheduler.is_loaded());
     }
 
@@ -501,7 +605,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         create_test_fastpath(temp.path());
 
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         scheduler.load(temp.path().to_str().unwrap()).unwrap();
 
         assert!(scheduler.is_loaded());
@@ -515,29 +619,31 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let result = scheduler.load("/nonexistent/path");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_get_tile_not_loaded() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let tile = scheduler.get_tile(0, 0, 0);
         assert!(tile.is_none());
     }
 
     #[test]
     fn test_cache_stats() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let stats = scheduler.cache_stats();
-        assert_eq!(stats.hits, 0);
-        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.l1.hits, 0);
+        assert_eq!(stats.l1.misses, 0);
+        assert_eq!(stats.l2.hits, 0);
+        assert_eq!(stats.l2.misses, 0);
     }
 
     #[test]
     fn test_in_flight_cleanup_on_prefetch_error() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let coord = TileCoord::new(0, 0, 0);
         let gen = scheduler.generation.load(Ordering::Acquire);
         // Decode will fail (nonexistent path), but in-flight must still be cleaned up
@@ -552,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_foreground_bypasses_in_flight() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let coord = TileCoord::new(0, 0, 0);
         // Simulate a prefetch thread holding the coord in-flight
         scheduler.in_flight.lock().insert(coord);
@@ -570,7 +676,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         create_test_fastpath(temp.path());
 
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         assert_eq!(scheduler.generation.load(Ordering::Acquire), 0);
 
         scheduler.load(temp.path().to_str().unwrap()).unwrap();
@@ -585,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_in_flight_cleanup_respects_generation() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         let coord = TileCoord::new(0, 0, 0);
 
         // Stale generation should not remove a new-generation in-flight marker.
@@ -606,7 +712,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         create_test_fastpath(temp.path());
 
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         // Manually insert a coord into in-flight
         scheduler.in_flight.lock().insert(TileCoord::new(0, 99, 99));
         assert!(!scheduler.in_flight.lock().is_empty());
@@ -617,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_in_flight_cleared_on_close() {
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         scheduler.in_flight.lock().insert(TileCoord::new(0, 99, 99));
         assert!(!scheduler.in_flight.lock().is_empty());
 
@@ -630,7 +736,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         create_test_fastpath(temp.path());
 
-        let scheduler = TileScheduler::new(512, 2);
+        let scheduler = TileScheduler::new(512, 64, 2);
         scheduler.load(temp.path().to_str().unwrap()).unwrap();
         // generation is now 1
 
@@ -644,5 +750,77 @@ mod tests {
         assert!(result.is_none());
         assert!(scheduler.in_flight.lock().is_empty());
         assert!(!scheduler.cache.contains(&coord));
+    }
+
+    #[test]
+    fn test_l2_not_cleared_on_load() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        // Manually insert an L2 entry
+        let l2_coord = SlideTileCoord::new(42, 0, 0, 0);
+        let compressed = crate::decoder::CompressedTileData {
+            jpeg_bytes: bytes::Bytes::from(vec![0u8; 100]),
+            width: 512,
+            height: 512,
+        };
+        scheduler.l2_cache.insert(l2_coord, compressed);
+
+        // Reload — L2 should survive
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        assert!(scheduler.l2_cache.contains(&l2_coord));
+    }
+
+    #[test]
+    fn test_l2_not_cleared_on_close() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        // Manually insert an L2 entry
+        let l2_coord = SlideTileCoord::new(42, 0, 0, 0);
+        let compressed = crate::decoder::CompressedTileData {
+            jpeg_bytes: bytes::Bytes::from(vec![0u8; 100]),
+            width: 512,
+            height: 512,
+        };
+        scheduler.l2_cache.insert(l2_coord, compressed);
+
+        // Close — L2 should survive
+        scheduler.close();
+
+        assert!(scheduler.l2_cache.contains(&l2_coord));
+    }
+
+    #[test]
+    fn test_active_slide_id_lifecycle() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+
+        // Before load: 0
+        assert_eq!(scheduler.active_slide_id.load(Ordering::Acquire), 0);
+
+        // After load: nonzero
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        let slide_id = scheduler.active_slide_id.load(Ordering::Acquire);
+        assert_ne!(slide_id, 0);
+
+        // After close: 0
+        scheduler.close();
+        assert_eq!(scheduler.active_slide_id.load(Ordering::Acquire), 0);
+
+        // After reload: nonzero (same path → same id)
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        let slide_id2 = scheduler.active_slide_id.load(Ordering::Acquire);
+        assert_ne!(slide_id2, 0);
+        assert_eq!(slide_id, slide_id2);
     }
 }

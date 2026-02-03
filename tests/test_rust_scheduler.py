@@ -205,6 +205,66 @@ class TestRustTileScheduler:
         stats = scheduler.cache_stats()
         assert stats["num_tiles"] == 0
 
+    def test_cache_stats_l2_keys(self):
+        """Test that cache_stats() includes all L2 keys."""
+        scheduler = RustTileScheduler()
+        stats = scheduler.cache_stats()
+
+        # L1 keys (backward-compatible)
+        assert "hits" in stats
+        assert "misses" in stats
+        assert "hit_ratio" in stats
+        assert "size_bytes" in stats
+        assert "num_tiles" in stats
+
+        # L2 keys
+        assert "l2_hits" in stats
+        assert "l2_misses" in stats
+        assert "l2_hit_ratio" in stats
+        assert "l2_size_bytes" in stats
+        assert "l2_num_tiles" in stats
+
+    def test_l2_populated_on_tile_load(self, mock_fastpath_dir: Path):
+        """Test that loading a tile populates the L2 compressed cache."""
+        scheduler = RustTileScheduler()
+        scheduler.load(str(mock_fastpath_dir))
+
+        # L2 should be empty initially
+        stats = scheduler.cache_stats()
+        assert stats["l2_num_tiles"] == 0
+
+        # Load a tile via get_tile (foreground path)
+        tile = scheduler.get_tile(0, 0, 0)
+        assert tile is not None
+
+        # L2 should now have 1 tile
+        stats = scheduler.cache_stats()
+        assert stats["l2_num_tiles"] == 1
+
+    def test_l2_persists_across_slide_switch(self, mock_fastpath_dir: Path):
+        """Test that L2 cache survives close + reload (not cleared)."""
+        scheduler = RustTileScheduler()
+        scheduler.load(str(mock_fastpath_dir))
+
+        # Load some tiles to populate L2
+        scheduler.get_tile(0, 0, 0)
+        scheduler.get_tile(2, 0, 0)
+        scheduler.get_tile(2, 1, 0)
+
+        stats = scheduler.cache_stats()
+        l2_count_before = stats["l2_num_tiles"]
+        assert l2_count_before >= 3
+
+        # Close and reload — L1 is cleared, L2 is NOT
+        scheduler.close()
+        scheduler.load(str(mock_fastpath_dir))
+
+        stats = scheduler.cache_stats()
+        # L1 should be empty
+        assert stats["num_tiles"] == 0
+        # L2 should still have tiles
+        assert stats["l2_num_tiles"] == l2_count_before
+
 
 class TestRustSchedulerComparisonWithPython:
     """Tests comparing Rust scheduler output with Python SlideManager."""

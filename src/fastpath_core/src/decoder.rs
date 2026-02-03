@@ -40,17 +40,19 @@ impl TileData {
 
 /// Compressed JPEG tile data (not yet decoded to RGB).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CompressedTileData {
     /// Raw JPEG file bytes.
     pub jpeg_bytes: Bytes,
     /// Tile width in pixels (parsed from JPEG header).
+    /// Used by L2 cache reads (Part 4).
+    #[allow(dead_code)]
     pub width: u32,
     /// Tile height in pixels (parsed from JPEG header).
+    /// Used by L2 cache reads (Part 4).
+    #[allow(dead_code)]
     pub height: u32,
 }
 
-#[allow(dead_code)]
 impl CompressedTileData {
     /// Size in bytes (JPEG compressed size, used for cache weighting).
     pub fn size_bytes(&self) -> usize {
@@ -114,6 +116,8 @@ pub fn decode_jpeg_bytes(compressed: &CompressedTileData) -> TileResult<TileData
 ///
 /// Supports JPEG (.jpg, .jpeg) format.
 /// Uses zune-jpeg for fast SIMD-accelerated decoding.
+/// Convenience wrapper used by tests; scheduler uses split read/decode path.
+#[allow(dead_code)]
 pub fn decode_tile(path: &Path) -> TileResult<TileData> {
     let compressed = read_jpeg_bytes(path)?;
     decode_jpeg_bytes(&compressed)
