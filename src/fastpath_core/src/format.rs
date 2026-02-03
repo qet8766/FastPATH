@@ -52,7 +52,8 @@ impl SlideMetadata {
                 "levels must not be empty".into(),
             ));
         }
-        for li in &self.levels {
+        self.levels.sort_by_key(|l| l.level);
+        for (i, li) in self.levels.iter().enumerate() {
             if li.downsample == 0 {
                 return Err(TileError::ValidationError(
                     format!("level {}: downsample must be positive", li.level),
@@ -68,16 +69,12 @@ impl SlideMetadata {
                     format!("level {}: rows must be positive", li.level),
                 ));
             }
-        }
-        let mut seen = std::collections::HashSet::new();
-        for li in &self.levels {
-            if !seen.insert(li.level) {
+            if i > 0 && li.level == self.levels[i - 1].level {
                 return Err(TileError::ValidationError(
                     format!("duplicate level number: {}", li.level),
                 ));
             }
         }
-        self.levels.sort_by_key(|l| l.level);
         Ok(())
     }
 

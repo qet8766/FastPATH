@@ -25,6 +25,7 @@ impl TileCoord {
 pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
+    pub hit_ratio: f64,
     pub size_bytes: usize,
     pub num_tiles: usize,
 }
@@ -84,16 +85,31 @@ impl TileCache {
     }
 
     /// Clear the cache.
+    ///
+    /// Runs pending eviction tasks synchronously so entries are gone before
+    /// return, and resets hit/miss counters so each slide starts fresh.
     pub fn clear(&self) {
         self.inner.invalidate_all();
-        // Don't reset stats - keep for debugging
+        self.inner.run_pending_tasks();
+        self.reset_stats();
+    }
+
+    /// Reset hit/miss counters to zero.
+    pub fn reset_stats(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
     }
 
     /// Get cache statistics.
     pub fn stats(&self) -> CacheStats {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_ratio = if total > 0 { hits as f64 / total as f64 } else { 0.0 };
         CacheStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
+            hits,
+            misses,
+            hit_ratio,
             size_bytes: self.inner.weighted_size() as usize,
             num_tiles: self.inner.entry_count() as usize,
         }
@@ -136,6 +152,7 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hit_ratio, 0.0);
     }
 
     #[test]
@@ -149,6 +166,7 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
+        assert_eq!(stats.hit_ratio, 1.0);
     }
 
     #[test]
@@ -157,11 +175,65 @@ mod tests {
         cache.insert(TileCoord::new(0, 1, 2), make_tile(100));
         cache.insert(TileCoord::new(0, 3, 4), make_tile(100));
 
+        // Generate some hits/misses before clearing
+        cache.get(&TileCoord::new(0, 1, 2));
+        cache.get(&TileCoord::new(0, 99, 99));
+
         cache.clear();
-        // moka clears asynchronously; run_pending forces completion
-        cache.inner.run_pending_tasks();
 
         assert!(cache.is_empty());
-        assert_eq!(cache.stats().size_bytes, 0);
+        let stats = cache.stats();
+        assert_eq!(stats.size_bytes, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.hit_ratio, 0.0);
+    }
+
+    #[test]
+    fn test_hit_ratio_mixed() {
+        let cache = TileCache::new(10);
+        let coord = TileCoord::new(0, 1, 2);
+        cache.insert(coord, make_tile(100));
+
+        // 3 hits
+        cache.get(&coord);
+        cache.get(&coord);
+        cache.get(&coord);
+        // 1 miss
+        cache.get(&TileCoord::new(0, 99, 99));
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 3);
+        assert_eq!(stats.misses, 1);
+        assert!((stats.hit_ratio - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_stats_after_clear() {
+        let cache = TileCache::new(10);
+        let coord = TileCoord::new(0, 1, 2);
+        cache.insert(coord, make_tile(100));
+        // Force moka to process the insert
+        cache.inner.run_pending_tasks();
+
+        // Generate hits and misses
+        cache.get(&coord);
+        cache.get(&coord);
+        cache.get(&TileCoord::new(0, 99, 99));
+
+        // Verify non-zero before clear
+        let stats = cache.stats();
+        assert!(stats.hits > 0);
+        assert!(stats.misses > 0);
+        assert!(stats.num_tiles > 0);
+
+        cache.clear();
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.hit_ratio, 0.0);
+        assert_eq!(stats.size_bytes, 0);
+        assert_eq!(stats.num_tiles, 0);
     }
 }

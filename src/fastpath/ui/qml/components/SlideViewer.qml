@@ -150,6 +150,14 @@ Item {
         }
     }
 
+    // Cache stats HUD
+    CacheStatsOverlay {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Theme.spacingNormal
+        z: 10
+    }
+
     // Update viewport when loaded
     Component.onCompleted: {
         if (SlideManager.isLoaded) {

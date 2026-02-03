@@ -11,3 +11,4 @@ PreprocessForm 1.0 PreprocessForm.qml
 PreprocessFileList 1.0 PreprocessFileList.qml
 PreprocessProgress 1.0 PreprocessProgress.qml
 PreprocessResult 1.0 PreprocessResult.qml
+CacheStatsOverlay 1.0 CacheStatsOverlay.qml

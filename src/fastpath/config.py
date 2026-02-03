@@ -5,7 +5,7 @@ Values can be overridden via environment variables.
 
 Environment Variables:
     FASTPATH_VIPS_PATH: Base path for VIPS installation (default: C:/vips)
-    FASTPATH_TILE_CACHE_MB: Rust scheduler tile cache size in MB (default: 12288)
+    FASTPATH_TILE_CACHE_MB: Rust scheduler tile cache size in MB (default: 4096)
     FASTPATH_PREFETCH_DISTANCE: Tiles to prefetch ahead (default: 3)
     FASTPATH_PYTHON_CACHE_SIZE: Python tile cache size in tiles (default: 256)
     FASTPATH_VIPS_CONCURRENCY: VIPS internal thread count (default: 24)
@@ -58,8 +58,8 @@ VIPS_REQUIRED_DLLS: tuple[str, ...] = ("libopenslide-1.dll", "libvips-42.dll")
 # Tile Cache Configuration
 # =============================================================================
 
-#: Rust tile scheduler cache size in MB (default: 12GB)
-TILE_CACHE_SIZE_MB: int = _get_env_int("FASTPATH_TILE_CACHE_MB", 12288)
+#: Rust tile scheduler cache size in MB (default: 4GB)
+TILE_CACHE_SIZE_MB: int = _get_env_int("FASTPATH_TILE_CACHE_MB", 4096)
 
 #: Number of tiles to prefetch in pan direction
 PREFETCH_DISTANCE: int = _get_env_int("FASTPATH_PREFETCH_DISTANCE", 3)

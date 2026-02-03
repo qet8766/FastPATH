@@ -7,7 +7,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Slot, Signal, Property
+from PySide6.QtCore import QObject, QTimer, QUrl, Slot, Signal, Property
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -24,6 +24,49 @@ from fastpath.ui.preprocess import PreprocessController, _normalize_file_url
 from fastpath_core import RustTileScheduler
 
 logger = logging.getLogger(__name__)
+
+
+class CacheStatsProvider(QObject):
+    """Polls Rust cache stats and exposes them to QML."""
+
+    statsUpdated = Signal()
+
+    def __init__(self, scheduler: RustTileScheduler, parent: QObject | None = None):
+        super().__init__(parent)
+        self._scheduler = scheduler
+        self._size_mb = 0.0
+        self._hit_ratio = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._poll)
+
+    @Slot()
+    def _poll(self):
+        stats = self._scheduler.cache_stats()
+        size_mb = round(stats["size_bytes"] / (1024 * 1024), 1)
+        total = stats.get("hits", 0) + stats.get("misses", 0)
+        ratio = stats["hits"] / total if total > 0 else 0.0
+        hit_ratio = round(stats.get("hit_ratio", ratio) * 100, 1)
+        if size_mb != self._size_mb or hit_ratio != self._hit_ratio:
+            self._size_mb = size_mb
+            self._hit_ratio = hit_ratio
+            self.statsUpdated.emit()
+
+    @Property(float, notify=statsUpdated)
+    def sizeMb(self) -> float:
+        return self._size_mb
+
+    @Property(float, notify=statsUpdated)
+    def hitRatio(self) -> float:
+        return self._hit_ratio
+
+    @Slot()
+    def start(self):
+        self._timer.start()
+
+    @Slot()
+    def stop(self):
+        self._timer.stop()
 
 
 class AppController(QObject):
@@ -383,6 +426,8 @@ def run_app(args: list[str] | None = None) -> int:
     # Ensure plugin resources are freed on app shutdown
     app.aboutToQuit.connect(plugin_manager.cleanup)
 
+    cache_stats_provider = CacheStatsProvider(rust_scheduler)
+
     controller = AppController(
         slide_manager, annotation_manager, plugin_manager, rust_scheduler
     )
@@ -408,6 +453,7 @@ def run_app(args: list[str] | None = None) -> int:
     engine.rootContext().setContextProperty("AnnotationManager", annotation_manager)
     engine.rootContext().setContextProperty("PluginManager", plugin_manager)
     engine.rootContext().setContextProperty("Navigator", controller.navigator)
+    engine.rootContext().setContextProperty("CacheStats", cache_stats_provider)
 
     # Load QML
     qml_dir = Path(__file__).parent / "qml"

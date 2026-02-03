@@ -1,6 +1,12 @@
 //! Tile scheduler with parallel I/O and prefetching.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 
 /// Maximum number of visible tiles to load in a single prefetch batch.
 /// Set to 256 to cover a 4K display (3840x2160) at any zoom level:
@@ -12,10 +18,6 @@ const MAX_VISIBLE_TILES: usize = 256;
 /// These tiles provide smooth panning by pre-loading one tile ring outside
 /// the visible area, covering ~32 tiles for a typical viewport perimeter.
 const EXTENDED_TILE_BUDGET: usize = 32;
-use std::sync::Arc;
-
-use parking_lot::RwLock;
-use rayon::prelude::*;
 
 use crate::cache::{CacheStats, TileCache, TileCoord};
 use crate::decoder::{decode_tile, TileData};
@@ -37,6 +39,10 @@ pub struct TileScheduler {
     slide: RwLock<Option<SlideState>>,
     /// Prefetch calculator.
     prefetch_calc: PrefetchCalculator,
+    /// Tiles currently being decoded — prevents duplicate work across rayon threads.
+    in_flight: Mutex<HashSet<TileCoord>>,
+    /// Monotonic counter bumped on load()/close() to invalidate stale prefetch batches.
+    generation: AtomicU64,
 }
 
 impl TileScheduler {
@@ -58,6 +64,8 @@ impl TileScheduler {
             cache,
             slide: RwLock::new(None),
             prefetch_calc,
+            in_flight: Mutex::new(HashSet::new()),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -75,7 +83,11 @@ impl TileScheduler {
         let metadata = SlideMetadata::load(&path)?;
         let resolver = TilePathResolver::new(path)?;
 
-        // Clear cache when loading a new slide
+        // Invalidate in-flight prefetch work before clearing cache.
+        // Bump generation first so workers see the change before the cache is cleared,
+        // preventing stale tiles from being inserted into the fresh cache.
+        self.generation.fetch_add(1, Ordering::Release);
+        self.in_flight.lock().clear();
         self.cache.clear();
 
         let mut slide = self.slide.write();
@@ -86,6 +98,8 @@ impl TileScheduler {
 
     /// Close the current slide.
     pub fn close(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        self.in_flight.lock().clear();
         let mut slide = self.slide.write();
         *slide = None;
         self.cache.clear();
@@ -344,6 +358,11 @@ impl TileScheduler {
     /// Get cache statistics.
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
+    }
+
+    /// Reset cache hit/miss counters to zero.
+    pub fn reset_cache_stats(&self) {
+        self.cache.reset_stats();
     }
 
     /// Get metadata for Python access.

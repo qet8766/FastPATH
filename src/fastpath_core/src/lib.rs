@@ -141,9 +141,15 @@ impl RustTileScheduler {
         let dict = PyDict::new(py);
         dict.set_item("hits", stats.hits)?;
         dict.set_item("misses", stats.misses)?;
+        dict.set_item("hit_ratio", stats.hit_ratio)?;
         dict.set_item("size_bytes", stats.size_bytes)?;
         dict.set_item("num_tiles", stats.num_tiles)?;
         Ok(dict)
+    }
+
+    /// Reset cache hit/miss counters to zero.
+    fn reset_cache_stats(&self) {
+        self.inner.reset_cache_stats();
     }
 
     /// Whether a slide is currently loaded.
