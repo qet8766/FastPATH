@@ -39,6 +39,11 @@ try:
 except ImportError:
     PILImage = None
 
+try:
+    import openslide
+except ImportError:
+    openslide = None
+
 
 @dataclass
 class TileInfo:
@@ -82,6 +87,8 @@ class SlideContext:
         self._load_pack()
 
         self._levels = self._build_levels()
+        self._wsi: openslide.OpenSlide | None = None
+        self._wsi_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -102,6 +109,13 @@ class SlideContext:
     @property
     def pyramid_mpp(self) -> float:
         return self._meta["target_mpp"]
+
+    @property
+    def slide_to_wsi_scale(self) -> float:
+        """Scale factor: slide coords -> WSI level-0 pixels."""
+        if self.source_mpp <= 0:
+            return 1.0
+        return self.pyramid_mpp / self.source_mpp
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -190,11 +204,22 @@ class SlideContext:
             self._pack_file.close()
             self._pack_file = None
 
+    def close_wsi(self) -> None:
+        """Close the OpenSlide handle if open."""
+        if self._wsi is not None:
+            try:
+                self._wsi.close()
+            except Exception:
+                pass
+            self._wsi = None
+            self._wsi_path = None
+
     def close(self) -> None:
+        self.close_wsi()
         self.close_pack()
 
     def __del__(self) -> None:
-        self.close_pack()
+        self.close()
 
     def level_for_mpp(self, target_mpp: float) -> int:
         """Return the coarsest level where ``level_mpp <= target_mpp``.
@@ -314,6 +339,59 @@ class SlideContext:
         ox = x - col_start * ts
         oy = y - row_start * ts
         return composite[oy : oy + h, ox : ox + w]
+
+    # ------------------------------------------------------------------
+    # Original WSI access
+    # ------------------------------------------------------------------
+
+    def _resolve_source_path(self) -> Path:
+        source = Path(self.source_file)
+        if source.is_absolute() and source.exists():
+            return source
+
+        candidate = self._path.parent / source
+        if candidate.exists():
+            return candidate
+
+        candidate = self._path / source
+        if candidate.exists():
+            return candidate
+
+        raise FileNotFoundError(
+            f"Source WSI not found: {self.source_file} (searched {self._path.parent} and {self._path})"
+        )
+
+    def _open_wsi(self) -> "openslide.OpenSlide":
+        if self._wsi is not None:
+            return self._wsi
+
+        if openslide is None:
+            raise RuntimeError("openslide-python is not available")
+        if PILImage is None:
+            raise RuntimeError("Pillow is required for WSI reading")
+
+        source_path = self._resolve_source_path()
+        self._wsi = openslide.OpenSlide(str(source_path))
+        self._wsi_path = source_path
+        return self._wsi
+
+    def get_original_region(self, x: int, y: int, w: int, h: int) -> np.ndarray:
+        """Read a region from the original WSI at level 0.
+
+        Coordinates are in WSI level-0 pixels. Returns RGB array (h, w, 3).
+        """
+        if w <= 0 or h <= 0:
+            raise ValueError("Region width and height must be positive")
+
+        wsi = self._open_wsi()
+        region = wsi.read_region((int(x), int(y)), 0, (int(w), int(h)))
+        if region.mode != "RGBA":
+            region = region.convert("RGBA")
+
+        background = PILImage.new("RGBA", region.size, (255, 255, 255, 255))
+        background.alpha_composite(region)
+        rgb = background.convert("RGB")
+        return np.array(rgb)
 
     def iter_tiles(
         self, level: int, roi: RegionOfInterest | None = None

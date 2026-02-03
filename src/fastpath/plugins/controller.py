@@ -9,6 +9,8 @@ import logging
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
+from fastpath.core.annotations import AnnotationManager
+
 from .base import ModelPlugin, Plugin
 from .executor import PluginExecutor
 from .registry import PluginRegistry
@@ -33,6 +35,8 @@ class PluginController(QObject):
         self._loaded_models: set[str] = set()
         self._last_output: PluginOutput | None = None
         self._cleaned_up = False
+        self._annotation_manager: AnnotationManager | None = None
+        self._current_plugin_name: str | None = None
 
     def __del__(self) -> None:
         try:
@@ -76,6 +80,9 @@ class PluginController(QObject):
     def register_plugin(self, plugin: Plugin) -> None:
         self._registry.register(plugin)
         self.pluginsChanged.emit()
+
+    def set_annotation_manager(self, manager: AnnotationManager | None) -> None:
+        self._annotation_manager = manager
 
     def unregister_plugin(self, name: str) -> None:
         removed = self._registry.unregister(name)
@@ -192,6 +199,7 @@ class PluginController(QObject):
                 return
 
         roi = RegionOfInterest(x=x, y=y, w=width, h=height)
+        self._current_plugin_name = plugin_name
 
         try:
             worker = self._executor.execute(plugin, region=roi, parent=self)
@@ -211,7 +219,45 @@ class PluginController(QObject):
 
     def _on_finished(self, output: PluginOutput) -> None:
         self._last_output = output
+        if (
+            output.success
+            and output.annotations
+            and self._annotation_manager is not None
+        ):
+            group = self._current_plugin_name or "plugin"
+            try:
+                self._annotation_manager.addAnnotationsBatch(output.annotations, group)
+                result = output.to_dict()
+                result["annotations"] = None
+                result["annotationsRouted"] = True
+                result["annotationGroup"] = group
+
+                breakdown = self._build_annotation_breakdown(output)
+                result["annotationBreakdown"] = breakdown
+                if breakdown:
+                    result["annotationCount"] = sum(breakdown.values())
+                else:
+                    result["annotationCount"] = len(output.annotations)
+
+                self.processingFinished.emit(result)
+                return
+            except Exception as e:
+                logger.warning("Failed to route annotations: %s", e)
+
         self.processingFinished.emit(output.to_dict())
+
+    def _build_annotation_breakdown(self, output: PluginOutput) -> dict[str, int]:
+        if output.measurements:
+            for key in ("counts_by_type", "type_counts", "counts"):
+                counts = output.measurements.get(key)
+                if isinstance(counts, dict):
+                    return {str(k): int(v) for k, v in counts.items()}
+
+        breakdown: dict[str, int] = {}
+        for ann in output.annotations or []:
+            label = ann.get("label") or "Unknown"
+            breakdown[label] = breakdown.get(label, 0) + 1
+        return breakdown
 
     def _on_error(self, error: str) -> None:
         self.processingError.emit(error)

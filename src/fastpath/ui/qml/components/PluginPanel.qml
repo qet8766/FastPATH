@@ -10,9 +10,11 @@ ThemedGroupBox {
     // State
     property var selectedRegion: null
     property bool isProcessing: false
+    property bool roiActive: false
     property var resultAnnotationIds: []
     property var resultBreakdown: ({})
     property int resultTotal: 0
+    property string resultGroup: ""
 
     // Signals
     signal roiSelectionRequested()
@@ -38,15 +40,21 @@ ThemedGroupBox {
         root.resultAnnotationIds = ids
         root.resultBreakdown = breakdown
         root.resultTotal = ids.length
+        root.resultGroup = ""
     }
 
     function clearPluginAnnotations() {
-        for (let i = 0; i < resultAnnotationIds.length; i++) {
-            AnnotationManager.removeAnnotation(resultAnnotationIds[i])
+        if (resultGroup !== "") {
+            AnnotationManager.removeAnnotationsByGroup(resultGroup)
+        } else {
+            for (let i = 0; i < resultAnnotationIds.length; i++) {
+                AnnotationManager.removeAnnotation(resultAnnotationIds[i])
+            }
         }
         resultAnnotationIds = []
         resultBreakdown = {}
         resultTotal = 0
+        resultGroup = ""
     }
 
     function refreshPluginList() {
@@ -75,7 +83,12 @@ ThemedGroupBox {
         function onProcessingFinished(result) {
             root.isProcessing = false
             progressBar.value = 0
-            if (result.success && result.outputType === "annotations" && result.annotations) {
+            if (result.annotationsRouted) {
+                root.resultAnnotationIds = []
+                root.resultTotal = result.annotationCount || 0
+                root.resultBreakdown = result.annotationBreakdown || {}
+                root.resultGroup = result.annotationGroup || ""
+            } else if (result.success && result.outputType === "annotations" && result.annotations) {
                 root.addAnnotationsFromResult(result.annotations)
             }
         }
@@ -122,7 +135,8 @@ ThemedGroupBox {
             spacing: Theme.spacingSmall
 
             ThemedButton {
-                text: "Select ROI"
+                text: root.roiActive ? "Selecting ROI..." : "Select ROI"
+                variant: root.roiActive ? "primary" : "secondary"
                 buttonSize: "small"
                 Layout.fillWidth: true
                 enabled: !root.isProcessing

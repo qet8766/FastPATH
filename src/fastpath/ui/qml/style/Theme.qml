@@ -87,5 +87,5 @@ QtObject {
     readonly property color viewerBackground: "#2a2a2a"
     readonly property color tileBackground: "#333333"
     readonly property real minScale: 0.01
-    readonly property real maxScale: 1.2
+    readonly property real maxScale: 1.8
 }

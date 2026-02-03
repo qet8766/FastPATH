@@ -591,6 +591,8 @@ def run_app(args: list[str] | None = None) -> int:
     settings = Settings()
     project_manager = ProjectManager()
 
+    plugin_manager.set_annotation_manager(annotation_manager)
+
     # Create Rust scheduler with configured cache and prefetch settings
     rust_scheduler = RustTileScheduler(
         cache_size_mb=L1_CACHE_SIZE_MB,

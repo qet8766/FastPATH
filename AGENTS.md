@@ -22,3 +22,6 @@ Git history favors a Conventional Commit style prefix such as `feat:`, `refactor
 
 ## Configuration & Environment
 Requires Python >=3.11, Rust toolchain, and system libvips with OpenSlide. On Windows, install to `C:/vips` or set `FASTPATH_VIPS_PATH`. Cache and performance settings are centralized in `src/fastpath/config.py`.
+
+## Notes
+- NuLite plugin dedup strategy: centroid-ownership (no Shapely dependency).

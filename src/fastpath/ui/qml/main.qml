@@ -484,6 +484,7 @@ ApplicationWindow {
                 PluginPanel {
                     id: pluginPanel
                     Layout.fillWidth: true
+                    roiActive: viewer.interactionMode === "roi"
                 }
 
                 AnnotationFilterPanel {

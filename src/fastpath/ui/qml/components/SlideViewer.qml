@@ -28,12 +28,12 @@ Item {
     // Forward ROI signal from InteractionLayer
     signal roiSelected(rect region)
 
-    // Dynamic zoom-out limit: can't zoom beyond the full slide fitting in the viewport
+    // Dynamic zoom-out limit: allow 30% margin beyond the full slide fitting in the viewport
     property real minScale: {
         var sw = SlideManager.width
         var sh = SlideManager.height
         if (sw > 0 && sh > 0 && width > 0 && height > 0)
-            return Math.min(width / sw, height / sh)
+            return Math.min(width / sw, height / sh) / 1.3
         return 0.01
     }
 
@@ -123,7 +123,7 @@ Item {
 
         // Smooth scrolling
         flickDeceleration: 3000
-        maximumFlickVelocity: 3000
+        maximumFlickVelocity: 8000
     }
 
     // Velocity tracking timer for prefetch optimization

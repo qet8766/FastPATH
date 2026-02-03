@@ -18,6 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ai = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "timm>=0.9",
+    "scikit-image>=0.20",
+    "opencv-python-headless>=4.8",
+]
 dev = [
     "pytest>=8.0",
     "pytest-qt>=4.0",
@@ -30,6 +37,11 @@ rust = [
     # Note: fastpath_core is built separately with maturin
 ]
 all = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "timm>=0.9",
+    "scikit-image>=0.20",
+    "opencv-python-headless>=4.8",
     "pyvips>=2.2",
     "pytest>=8.0",
     "pytest-qt>=4.0",

@@ -81,6 +81,8 @@ class PluginExecutor:
 
     def clear_slide(self) -> None:
         """Discard the current SlideContext."""
+        if self._context is not None:
+            self._context.close()
         self._context = None
 
     @property

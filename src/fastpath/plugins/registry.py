@@ -5,6 +5,7 @@ Plain Python — no Qt dependencies.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import inspect
 import logging
@@ -63,6 +64,7 @@ class PluginRegistry:
         """Scan built-in examples and external search paths for plugins."""
         # Built-in examples
         self._load_builtin_plugins()
+        self._load_builtin_packages()
 
         # External directories
         for search_dir in self._search_paths:
@@ -77,6 +79,22 @@ class PluginRegistry:
             self._load_plugins_from_directory(examples_dir)
         except ImportError:
             pass
+
+    def _load_builtin_packages(self) -> None:
+        """Load built-in plugin packages under fastpath.plugins."""
+        base_dir = Path(__file__).parent
+        for entry in base_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith("_") or entry.name == "examples":
+                continue
+            module_name = f"fastpath.plugins.{entry.name}"
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as e:
+                logger.debug("Skipping plugin package %s: %s", module_name, e)
+                continue
+            self._register_plugins_from_module(module, source=str(entry))
 
     def _load_plugins_from_directory(self, directory: Path) -> None:
         """Load all plugins from a directory."""
@@ -100,26 +118,30 @@ class PluginRegistry:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
 
-            for attr_name in dir(module):
-                attr = getattr(module, attr_name)
-                try:
-                    if (
-                        inspect.isclass(attr)
-                        and issubclass(attr, Plugin)
-                        and attr is not Plugin
-                        and not getattr(attr, "__abstractmethods__", None)
-                    ):
-                        plugin = attr()
-                        self.register(plugin)
-                except TypeError:
-                    pass
-                except Exception as e:
-                    logger.warning(
-                        "Failed to instantiate plugin %s from %s: %s",
-                        attr_name,
-                        filepath,
-                        e,
-                    )
+            self._register_plugins_from_module(module, source=str(filepath))
 
         except Exception as e:
             logger.warning("Failed to load plugin from %s: %s", filepath, e)
+
+    def _register_plugins_from_module(self, module: object, source: str) -> None:
+        """Register concrete Plugin subclasses from a loaded module."""
+        for attr_name in dir(module):
+            attr = getattr(module, attr_name)
+            try:
+                if (
+                    inspect.isclass(attr)
+                    and issubclass(attr, Plugin)
+                    and attr is not Plugin
+                    and not getattr(attr, "__abstractmethods__", None)
+                ):
+                    plugin = attr()
+                    self.register(plugin)
+            except TypeError:
+                pass
+            except Exception as e:
+                logger.warning(
+                    "Failed to instantiate plugin %s from %s: %s",
+                    attr_name,
+                    source,
+                    e,
+                )
