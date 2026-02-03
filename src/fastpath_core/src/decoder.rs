@@ -38,18 +38,57 @@ impl TileData {
     }
 }
 
-/// Decode a tile from a file path.
+/// Compressed JPEG tile data (not yet decoded to RGB).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CompressedTileData {
+    /// Raw JPEG file bytes.
+    pub jpeg_bytes: Bytes,
+    /// Tile width in pixels (parsed from JPEG header).
+    pub width: u32,
+    /// Tile height in pixels (parsed from JPEG header).
+    pub height: u32,
+}
+
+#[allow(dead_code)]
+impl CompressedTileData {
+    /// Size in bytes (JPEG compressed size, used for cache weighting).
+    pub fn size_bytes(&self) -> usize {
+        self.jpeg_bytes.len()
+    }
+}
+
+/// Read a JPEG tile file and parse its header for dimensions.
 ///
-/// Supports JPEG (.jpg, .jpeg) format.
-/// Uses zune-jpeg for fast SIMD-accelerated decoding.
-pub fn decode_tile(path: &Path) -> TileResult<TileData> {
-    // Read file into memory
+/// Returns compressed JPEG bytes with width/height metadata.
+/// Does NOT decode pixels — use `decode_jpeg_bytes()` for that.
+pub fn read_jpeg_bytes(path: &Path) -> TileResult<CompressedTileData> {
     let mut file = File::open(path)?;
     let mut jpeg_data = Vec::new();
     file.read_to_end(&mut jpeg_data)?;
 
-    // Create decoder and decode
+    // Parse JPEG header for dimensions without decoding pixels
     let mut decoder = JpegDecoder::new(&jpeg_data);
+    decoder
+        .decode_headers()
+        .map_err(|e| TileError::Decode(format!("Failed to parse JPEG header: {:?}", e)))?;
+
+    let info = decoder
+        .info()
+        .ok_or_else(|| TileError::Decode("Failed to get image info from header".into()))?;
+
+    Ok(CompressedTileData {
+        jpeg_bytes: Bytes::from(jpeg_data),
+        width: info.width as u32,
+        height: info.height as u32,
+    })
+}
+
+/// Decode compressed JPEG bytes to RGB pixel data.
+///
+/// Handles grayscale-to-RGB conversion automatically.
+pub fn decode_jpeg_bytes(compressed: &CompressedTileData) -> TileResult<TileData> {
+    let mut decoder = JpegDecoder::new(compressed.jpeg_bytes.as_ref());
 
     let pixels = decoder
         .decode()
@@ -57,24 +96,27 @@ pub fn decode_tile(path: &Path) -> TileResult<TileData> {
 
     let info = decoder
         .info()
-        .ok_or_else(|| TileError::Decode("Failed to get image info".to_string()))?;
+        .ok_or_else(|| TileError::Decode("Failed to get image info".into()))?;
 
     let width = info.width as u32;
     let height = info.height as u32;
 
-    // zune-jpeg outputs RGB by default for color images, grayscale for grayscale
-    // Convert grayscale to RGB if needed
     let rgb_data = if info.components == 1 {
-        // Grayscale -> RGB: duplicate each gray value 3 times
-        pixels
-            .iter()
-            .flat_map(|&gray| [gray, gray, gray])
-            .collect()
+        pixels.iter().flat_map(|&gray| [gray, gray, gray]).collect()
     } else {
         pixels
     };
 
     Ok(TileData::new(rgb_data, width, height))
+}
+
+/// Decode a tile from a file path.
+///
+/// Supports JPEG (.jpg, .jpeg) format.
+/// Uses zune-jpeg for fast SIMD-accelerated decoding.
+pub fn decode_tile(path: &Path) -> TileResult<TileData> {
+    let compressed = read_jpeg_bytes(path)?;
+    decode_jpeg_bytes(&compressed)
 }
 
 #[cfg(test)]
@@ -96,6 +138,42 @@ mod tests {
         fs::write(&path, b"not a jpeg").unwrap();
 
         let result = decode_tile(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_jpeg_bytes_invalid_path() {
+        let result = read_jpeg_bytes(Path::new("/nonexistent/path.jpg"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_jpeg_bytes_invalid_data() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("fake.jpg");
+        fs::write(&path, b"not a jpeg").unwrap();
+        let result = read_jpeg_bytes(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compressed_tile_data_size() {
+        let data = CompressedTileData {
+            jpeg_bytes: Bytes::from(vec![0u8; 1024]),
+            width: 512,
+            height: 512,
+        };
+        assert_eq!(data.size_bytes(), 1024);
+    }
+
+    #[test]
+    fn test_decode_jpeg_bytes_invalid_data() {
+        let bad = CompressedTileData {
+            jpeg_bytes: Bytes::from(b"not a jpeg".to_vec()),
+            width: 0,
+            height: 0,
+        };
+        let result = decode_jpeg_bytes(&bad);
         assert!(result.is_err());
     }
 }
