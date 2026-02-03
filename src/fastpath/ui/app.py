@@ -108,6 +108,8 @@ class AppController(QObject):
         self._loading_lock = threading.Lock()
         # Initial render flag - skip cache filtering on first render after load
         self._needs_initial_render = False
+        # Generation counter for cache-busting QML image URLs on slide switch
+        self._slide_generation = 0
         # Multi-slide navigation
         self._navigator = SlideNavigator(self)
 
@@ -189,6 +191,19 @@ class AppController(QObject):
                 logger.error("Slide not found: %s", resolved)
                 self.errorOccurred.emit(f"File not found: {resolved}")
                 return False
+
+            # Clear all visual state from previous slide BEFORE loading new one.
+            # This prevents stale tiles from flashing during the transition:
+            # - tile model: QML main layer still referencing old source URLs
+            # - fallback model: QML fallback layer (z:0) showing old slide's tiles
+            # - previous_level: stale value causes _update_fallback_on_level_change
+            #   to skip the update or copy wrong tiles on first render
+            self._tile_model.clear()
+            self._fallback_tile_model.clear()
+            self._previous_level = -1
+
+            # Bump generation so tile URLs change, forcing QML to re-request images
+            self._slide_generation += 1
 
             # Load with Rust scheduler FIRST (for tile loading)
             # This must happen before SlideManager.load() which emits slideLoaded signal
@@ -356,7 +371,7 @@ class AppController(QObject):
                 "y": pos[1],
                 "width": pos[2],
                 "height": pos[3],
-                "source": f"image://tiles/{level}/{col}_{row}",
+                "source": f"image://tiles/{level}/{col}_{row}?g={self._slide_generation}",
             })
         return tiles
 
@@ -370,6 +385,12 @@ class AppController(QObject):
 
     def _on_slide_loaded(self) -> None:
         """Handle slide loaded signal."""
+        # Clear fallback model — guardrail against stale tiles surviving into
+        # the new slide's first render (openSlide already clears, but this
+        # covers any signal-driven re-entry before _update_tiles runs)
+        self._fallback_tile_model.clear()
+        self._previous_level = -1
+
         # Reset viewport to show whole slide
         self._scale = 0.1
         self._viewport_x = 0

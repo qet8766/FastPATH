@@ -58,7 +58,10 @@ class TileImageProvider(QQuickImageProvider):
             QImage of the tile
         """
         try:
-            parts = id.split("/")
+            # Strip query string (e.g. "?g=1" used for cache-busting on slide switch)
+            url_part, _, _ = id.partition("?")
+
+            parts = url_part.split("/")
             if len(parts) != 2:
                 return self._placeholder
 
