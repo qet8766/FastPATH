@@ -52,7 +52,12 @@ export class WebGPURenderer {
       throw new Error("No suitable GPU adapter found");
     }
 
-    this.device = await adapter.requestDevice();
+    const adapterLimits = adapter.limits;
+    this.device = await adapter.requestDevice({
+      requiredLimits: {
+        maxTextureArrayLayers: Math.min(adapterLimits.maxTextureArrayLayers, 2048),
+      },
+    });
     this.queue = this.device.queue;
     this.context = this.canvas.getContext("webgpu");
     if (!this.context) {
@@ -85,7 +90,7 @@ export class WebGPURenderer {
         depthOrArrayLayers: maxLayers,
       },
       format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     this.textureView = this.texture.createView({ dimension: "2d-array" });
 

@@ -1,17 +1,18 @@
 import type { Viewport } from "../types";
 
 const ZOOM_FACTOR = 1.4;
-const MIN_SCALE = 0.05;
-const MAX_SCALE = 16;
+const MAX_SCALE = 1.5;
 
 export interface InputHandlerOptions {
   onViewportChange: (viewport: Viewport) => void;
+  getMinScale?: () => number;
 }
 
 export class InputHandler {
   private element: HTMLElement;
   private viewport: Viewport;
   private onViewportChange: (viewport: Viewport) => void;
+  private getMinScale: () => number;
   private pointerId: number | null = null;
   private lastPointer: { x: number; y: number; time: number } | null = null;
 
@@ -19,6 +20,7 @@ export class InputHandler {
     this.element = element;
     this.viewport = viewport;
     this.onViewportChange = options.onViewportChange;
+    this.getMinScale = options.getMinScale ?? (() => 0.01);
     this.attach();
   }
 
@@ -122,7 +124,7 @@ export class InputHandler {
   };
 
   private clampScale(scale: number): number {
-    return Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale));
+    return Math.max(this.getMinScale(), Math.min(MAX_SCALE, scale));
   }
 
   private emit(viewport: Viewport): void {

@@ -42,6 +42,7 @@ export class FastPATHViewer {
     this.onViewportChange = options.onViewportChange;
     this.input = new InputHandler(this.container, this.state.viewport, {
       onViewportChange: (viewport) => this.updateViewport(viewport),
+      getMinScale: () => this.getMinScale(),
     });
 
     this.atlas = new TileTextureAtlas();
@@ -94,9 +95,10 @@ export class FastPATHViewer {
 
   zoomBy(factor: number, anchorX = 0.5, anchorY = 0.5): void {
     const viewport = this.state.viewport;
-    const nextScale = viewport.scale * factor;
-    const newWidth = viewport.width / factor;
-    const newHeight = viewport.height / factor;
+    const nextScale = Math.max(this.getMinScale(), Math.min(1.5, viewport.scale * factor));
+    const effectiveFactor = nextScale / viewport.scale;
+    const newWidth = viewport.width / effectiveFactor;
+    const newHeight = viewport.height / effectiveFactor;
     const focusX = viewport.x + viewport.width * anchorX;
     const focusY = viewport.y + viewport.height * anchorY;
     const newX = focusX - newWidth * anchorX;
@@ -171,6 +173,18 @@ export class FastPATHViewer {
     const width = rect.width / this.state.viewport.scale;
     const height = rect.height / this.state.viewport.scale;
     this.updateViewport({ width, height });
+  }
+
+  private getMinScale(): number {
+    if (!this.metadata) {
+      return 0.01;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    const canvasW = rect.width > 0 ? rect.width : 1024;
+    const canvasH = rect.height > 0 ? rect.height : 768;
+    const largestAxis = Math.max(this.metadata.dimensions[0], this.metadata.dimensions[1]);
+    const canvasMin = Math.min(canvasW, canvasH);
+    return canvasMin / largestAxis;
   }
 
   private attachResizeObserver(): void {

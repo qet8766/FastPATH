@@ -40,7 +40,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     app.include_router(create_slides_router(slides))
 
-    @app.get("/slides/{slide_id}/{file_path:path}")
+    @app.api_route("/slides/{slide_id}/{file_path:path}", methods=["GET", "HEAD"])
     def get_slide_file(slide_id: str, file_path: str, request: Request):
         slide = slides.get(slide_id)
         if not slide:

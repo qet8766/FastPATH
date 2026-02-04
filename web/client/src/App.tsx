@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { fetchSlides } from "./api";
+import { fetchSlides, slideBaseUrl } from "./api";
 import type { SlideMetadata, SlideSummary, Viewport } from "./types";
 import { FastPATHViewer } from "./viewer/FastPATHViewer";
 
@@ -132,7 +132,7 @@ export default function App() {
               className={`slide-item ${activeSlide?.hash === slide.hash ? "active" : ""}`}
               onClick={() => handleOpenSlide(slide)}
             >
-              <img src={slide.thumbnailUrl} alt={slide.name} />
+              <img src={slideBaseUrl(slide.hash) + "/thumbnail.jpg"} alt={slide.name} />
               <div>
                 <div className="slide-name">{slide.name}</div>
                 <div className="slide-meta">
@@ -170,7 +170,7 @@ export default function App() {
         </div>
         {activeSlide ? (
           <div className="minimap" onClick={handleMinimapClick}>
-            <img src={activeSlide.thumbnailUrl} alt="Slide minimap" />
+            <img src={slideBaseUrl(activeSlide.hash) + "/thumbnail.jpg"} alt="Slide minimap" />
             {minimapStyle ? <div className="minimap-viewport" style={minimapStyle} /> : null}
           </div>
         ) : null}

@@ -13,7 +13,7 @@ struct VertexIn {
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) uv: vec2<f32>,
-  @location(1) layer: u32,
+  @location(1) @interpolate(flat) layer: u32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -34,6 +34,6 @@ fn vs_main(input: VertexIn) -> VertexOut {
 
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-  let color = textureSample(tileTexture, tileSampler, vec3<f32>(input.uv, f32(input.layer)));
+  let color = textureSample(tileTexture, tileSampler, input.uv, input.layer);
   return color;
 }
