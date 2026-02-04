@@ -35,7 +35,7 @@ def _setup_windows_vips(os, ctypes, vips_base_path, required_dlls, _logger):
     if not vips_base_path.exists():
         return
 
-    vips_dirs = sorted(vips_base_path.glob("vips-dev-*"), reverse=True)
+    vips_dirs = sorted((d for d in vips_base_path.glob("vips-dev-*") if d.is_dir()), reverse=True)
     if not vips_dirs:
         return
 

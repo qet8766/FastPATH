@@ -321,6 +321,21 @@ class VipsPyramidBuilder:
         if not tiles_dir.exists():
             raise RuntimeError(f"Missing dzsave tiles at {tiles_dir}")
 
+        # Prefer the Rust packer for speed; fall back to the Python implementation if the
+        # extension isn't available (e.g. preprocess-only environments).
+        try:
+            from fastpath_core import pack_dzsave_tiles  # type: ignore
+        except (ImportError, OSError):
+            pack_dzsave_tiles = None
+
+        if pack_dzsave_tiles is not None:
+            try:
+                level_tuples = [(info.level, info.cols, info.rows) for info in levels]
+                pack_dzsave_tiles(str(pyramid_dir), level_tuples)
+                return
+            except Exception as e:
+                raise RuntimeError(f"Rust packer failed: {e}") from e
+
         pack_path = pyramid_dir / "tiles.pack"
         idx_path = pyramid_dir / "tiles.idx"
 

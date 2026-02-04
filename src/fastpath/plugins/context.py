@@ -44,6 +44,11 @@ try:
 except ImportError:
     openslide = None
 
+try:
+    from fastpath_core import FastpathTileReader
+except (ImportError, OSError):
+    FastpathTileReader = None
+
 
 @dataclass
 class TileInfo:
@@ -64,6 +69,18 @@ class SlideContext:
 
     def __init__(self, slide_path: str | Path) -> None:
         self._path = Path(slide_path)
+        # Initialize all fields up front so __del__ is safe even if __init__ raises.
+        self._meta: dict = {}
+        self._levels: list[LevelInfo] = []
+        self._wsi: openslide.OpenSlide | None = None
+        self._wsi_path: Path | None = None
+        self._rust_reader: FastpathTileReader | None = None
+        self._pack_levels: dict[int, tuple[int, int, int]] = {}
+        self._pack_index: bytes | None = None
+        self._pack_entries_base = 0
+        self._pack_file: io.BufferedReader | None = None
+        self._pack_mmap: mmap.mmap | None = None
+
         if not self._path.exists():
             raise FileNotFoundError(f"Slide path not found: {self._path}")
 
@@ -79,16 +96,19 @@ class SlideContext:
                 f"Unsupported tile_format: {self._meta.get('tile_format')}"
             )
 
-        self._pack_levels: dict[int, tuple[int, int, int]] = {}
-        self._pack_index: bytes | None = None
-        self._pack_entries_base = 0
-        self._pack_file: io.BufferedReader | None = None
-        self._pack_mmap: mmap.mmap | None = None
-        self._load_pack()
+        if FastpathTileReader is not None:
+            try:
+                self._rust_reader = FastpathTileReader(str(self._path))
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize Rust tile reader; falling back to Python pack reader: %s",
+                    e,
+                )
+                self._rust_reader = None
+        if self._rust_reader is None:
+            self._load_pack()
 
         self._levels = self._build_levels()
-        self._wsi: openslide.OpenSlide | None = None
-        self._wsi_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -197,6 +217,7 @@ class SlideContext:
         self._pack_mmap = mmap.mmap(self._pack_file.fileno(), 0, access=mmap.ACCESS_READ)
 
     def close_pack(self) -> None:
+        self._rust_reader = None
         if self._pack_mmap is not None:
             self._pack_mmap.close()
             self._pack_mmap = None
@@ -294,6 +315,15 @@ class SlideContext:
 
         Returns None if the tile file doesn't exist.
         """
+        if self._rust_reader is not None:
+            if level < 0 or col < 0 or row < 0:
+                return None
+            tile_data = self._rust_reader.decode_tile(level, col, row)
+            if tile_data is None:
+                return None
+            data, width, height = tile_data
+            return np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+
         data = self._tile_bytes(level, col, row)
         if data is None:
             return None
@@ -315,6 +345,14 @@ class SlideContext:
 
         Returns an RGB numpy array of shape ``(h, w, 3)``.
         """
+        if self._rust_reader is not None:
+            if w <= 0 or h <= 0:
+                raise ValueError("Region width and height must be positive")
+            if level < 0:
+                return np.full((h, w, 3), 255, dtype=np.uint8)
+            data = self._rust_reader.decode_region(level, x, y, w, h)
+            return np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
+
         ts = self.tile_size
         col_start = x // ts
         col_end = (x + w - 1) // ts + 1

@@ -1,6 +1,7 @@
 //! Packed tile reader for .fastpath directories.
 
 use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use bytes::Bytes;
@@ -165,6 +166,116 @@ impl TilePack {
     }
 }
 
+/// Pack dzsave output (tiles_files) into tiles.pack/tiles.idx and remove dzsave files.
+///
+/// The dzsave layout is expected to be:
+/// `fastpath_dir/tiles_files/<level>/<col>_<row>.jpg` (or `.jpeg`).
+///
+/// Missing tiles are written as zero-length entries, matching the Python packer behavior.
+pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> TileResult<()> {
+    let tiles_dir = fastpath_dir.join("tiles_files");
+    if !tiles_dir.exists() {
+        return Err(TileError::Validation(format!(
+            "Missing dzsave tiles at {}",
+            tiles_dir.display()
+        )));
+    }
+
+    let pack_path = fastpath_dir.join("tiles.pack");
+    let idx_path = fastpath_dir.join("tiles.idx");
+
+    let pack_file = File::create(&pack_path)?;
+    let idx_file = File::create(&idx_path)?;
+    let mut pack_writer = BufWriter::new(pack_file);
+    let mut idx_writer = BufWriter::new(idx_file);
+
+    idx_writer.write_all(MAGIC)?;
+    idx_writer.write_all(&VERSION.to_le_bytes())?;
+    idx_writer.write_all(&(levels.len() as u32).to_le_bytes())?;
+
+    // Level table: entry_offset is relative to entries section (after header + level table).
+    let mut entry_offset: u64 = 0;
+    for (level, cols, rows) in levels {
+        idx_writer.write_all(&level.to_le_bytes())?;
+        idx_writer.write_all(&cols.to_le_bytes())?;
+        idx_writer.write_all(&rows.to_le_bytes())?;
+        idx_writer.write_all(&entry_offset.to_le_bytes())?;
+
+        let entry_count = (*cols as u64).saturating_mul(*rows as u64);
+        let level_bytes = entry_count
+            .checked_mul(ENTRY_SIZE as u64)
+            .ok_or_else(|| TileError::Validation("tiles.idx entry table overflow".into()))?;
+        entry_offset = entry_offset
+            .checked_add(level_bytes)
+            .ok_or_else(|| TileError::Validation("tiles.idx entry_offset overflow".into()))?;
+    }
+
+    // Entry table + packed bytes.
+    let mut pack_offset: u64 = 0;
+    for (level, cols, rows) in levels {
+        let level_dir = tiles_dir.join(level.to_string());
+        if !level_dir.exists() {
+            return Err(TileError::Validation(format!(
+                "Missing level directory: {}",
+                level_dir.display()
+            )));
+        }
+
+        for row in 0..*rows {
+            for col in 0..*cols {
+                let jpg = level_dir.join(format!("{}_{}.jpg", col, row));
+                let jpeg = level_dir.join(format!("{}_{}.jpeg", col, row));
+
+                let tile_path = if jpg.exists() {
+                    Some(jpg)
+                } else if jpeg.exists() {
+                    Some(jpeg)
+                } else {
+                    None
+                };
+
+                let Some(tile_path) = tile_path else {
+                    idx_writer.write_all(&0u64.to_le_bytes())?;
+                    idx_writer.write_all(&0u32.to_le_bytes())?;
+                    idx_writer.write_all(&0u32.to_le_bytes())?;
+                    continue;
+                };
+
+                let data = std::fs::read(&tile_path)?;
+                let length: u32 = data.len().try_into().map_err(|_e| {
+                    TileError::Validation(format!(
+                        "Tile too large to pack ({} bytes): {}",
+                        data.len(),
+                        tile_path.display()
+                    ))
+                })?;
+
+                pack_writer.write_all(&data)?;
+
+                idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                idx_writer.write_all(&length.to_le_bytes())?;
+                idx_writer.write_all(&0u32.to_le_bytes())?;
+
+                pack_offset = pack_offset
+                    .checked_add(length as u64)
+                    .ok_or_else(|| TileError::Validation("tiles.pack offset overflow".into()))?;
+            }
+        }
+    }
+
+    idx_writer.flush()?;
+    pack_writer.flush()?;
+
+    // Clean up dzsave output to save disk space.
+    std::fs::remove_dir_all(&tiles_dir)?;
+    let dzi_path = fastpath_dir.join("tiles.dzi");
+    if dzi_path.exists() {
+        std::fs::remove_file(&dzi_path)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(windows)]
 fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
@@ -177,4 +288,55 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
     file.read_at(buf, offset)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::test_utils::test_jpeg_bytes;
+
+    #[test]
+    fn test_pack_dzsave_tiles_writes_pack_and_cleans_up() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        let tiles_dir = dir.join("tiles_files");
+        fs::create_dir_all(tiles_dir.join("0")).unwrap();
+        fs::create_dir_all(tiles_dir.join("1")).unwrap();
+
+        let jpeg = test_jpeg_bytes();
+        // Present tile with .jpg extension
+        fs::write(tiles_dir.join("0").join("0_0.jpg"), &jpeg).unwrap();
+        // Present tile with .jpeg extension (fallback path)
+        fs::write(tiles_dir.join("1").join("0_0.jpeg"), &jpeg).unwrap();
+        // Missing tile: 0/1_0.jpg is intentionally absent
+
+        fs::write(dir.join("tiles.dzi"), b"dummy").unwrap();
+
+        pack_dzsave_tiles(dir, &[(0, 2, 1), (1, 1, 1)]).unwrap();
+
+        assert!(!tiles_dir.exists(), "tiles_files should be removed");
+        assert!(!dir.join("tiles.dzi").exists(), "tiles.dzi should be removed");
+        assert!(dir.join("tiles.pack").exists());
+        assert!(dir.join("tiles.idx").exists());
+
+        let pack = TilePack::open(dir).unwrap();
+
+        // Present .jpg tile
+        let t0 = pack.tile_ref(0, 0, 0).unwrap();
+        let b0 = pack.read_tile_bytes(t0).unwrap();
+        assert_eq!(b0.as_ref(), jpeg.as_slice());
+
+        // Missing tile should be encoded as a zero-length entry (tile_ref == None).
+        assert!(pack.tile_ref(0, 1, 0).is_none());
+
+        // Present .jpeg tile
+        let t1 = pack.tile_ref(1, 0, 0).unwrap();
+        let b1 = pack.read_tile_bytes(t1).unwrap();
+        assert_eq!(b1.as_ref(), jpeg.as_slice());
+    }
 }

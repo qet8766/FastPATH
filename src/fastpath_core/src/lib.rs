@@ -15,13 +15,17 @@ mod pack;
 mod prefetch;
 mod scheduler;
 mod slide_pool;
+mod tile_reader;
 #[cfg(test)]
 pub(crate) mod test_utils;
+
+use std::path::Path;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use scheduler::TileScheduler;
+use tile_reader::FastpathTileReader;
 
 /// Python-exposed tile scheduler with two-level caching.
 ///
@@ -272,6 +276,17 @@ impl RustTileScheduler {
     }
 }
 
+/// Pack dzsave output tiles_files into tiles.pack/tiles.idx.
+///
+/// Args:
+///   path: Path to the .fastpath directory (must contain tiles_files from dzsave)
+///   levels: List of (level, cols, rows) entries
+#[pyfunction]
+fn pack_dzsave_tiles(path: &str, levels: Vec<(u32, u32, u32)>) -> PyResult<()> {
+    pack::pack_dzsave_tiles(Path::new(path), &levels)?;
+    Ok(())
+}
+
 /// Whether the Rust extension was compiled without optimizations (debug build).
 #[pyfunction]
 fn is_debug_build() -> bool {
@@ -282,6 +297,8 @@ fn is_debug_build() -> bool {
 #[pymodule]
 fn fastpath_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustTileScheduler>()?;
+    m.add_class::<FastpathTileReader>()?;
+    m.add_function(wrap_pyfunction!(pack_dzsave_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(is_debug_build, m)?)?;
     Ok(())
 }
