@@ -5,10 +5,17 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QSize
+from PySide6.QtGui import QImageReader
 
 from fastpath.ui.providers import TileImageProvider
 from fastpath_core import RustTileScheduler
+
+
+def _qt_supports_jpeg() -> bool:
+    fmts = {bytes(x).lower() for x in QImageReader.supportedImageFormats()}
+    return b"jpg" in fmts or b"jpeg" in fmts
 
 
 def test_tile_image_provider_no_copy_buffer_lifetime(
@@ -69,3 +76,29 @@ def test_tile_image_provider_tile_buffer_path(
     gc.collect()
     second = bytes(img.bits()[:64])
     assert first == second
+
+
+@pytest.mark.skipif(not _qt_supports_jpeg(), reason="Qt build does not support JPEG decoding")
+def test_tile_image_provider_jpeg_mode_warms_l2_only(
+    monkeypatch, mock_fastpath_dir: Path, qapp  # noqa: ARG001
+) -> None:
+    """In FASTPATH_TILE_MODE=jpeg, the provider should not populate Rust L1."""
+    monkeypatch.setenv("FASTPATH_TILE_MODE", "jpeg")
+    monkeypatch.setenv("FASTPATH_FORCE_QIMAGE_COPY", "0")
+
+    scheduler = RustTileScheduler()
+    scheduler.load(str(mock_fastpath_dir))
+
+    stats = scheduler.cache_stats()
+    assert stats["num_tiles"] == 0
+    assert stats["l2_num_tiles"] == 0
+
+    provider = TileImageProvider(scheduler)
+    assert provider._tile_mode == "jpeg"  # sanity check
+
+    img = provider.requestImage("2/0_0", QSize(), QSize())
+    assert not img.isNull()
+
+    stats = scheduler.cache_stats()
+    assert stats["num_tiles"] == 0
+    assert stats["l2_num_tiles"] >= 1

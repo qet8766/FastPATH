@@ -62,6 +62,15 @@ class TileImageProvider(QQuickImageProvider):
         super().__init__(QQuickImageProvider.ImageType.Image)
         self._rust_scheduler = rust_scheduler
         self._placeholder = self._create_placeholder()
+        tile_mode_env = os.environ.get("FASTPATH_TILE_MODE", "rgb").strip().lower()
+        self._tile_mode = "jpeg" if tile_mode_env in {"jpeg", "jpg"} else "rgb"
+        if self._tile_mode == "jpeg" and not hasattr(self._rust_scheduler, "get_tile_jpeg"):
+            logger.warning(
+                "FASTPATH_TILE_MODE=%r requested but Rust extension does not expose get_tile_jpeg(); "
+                "falling back to rgb",
+                tile_mode_env,
+            )
+            self._tile_mode = "rgb"
         # `QImage(data, ...)` wraps the provided buffer. Copying forces QImage to
         # own its pixels (safe but expensive). PySide6 keeps the Python buffer
         # alive for the lifetime of the QImage, so skipping the copy avoids an
@@ -120,7 +129,10 @@ class TileImageProvider(QQuickImageProvider):
                 return self._placeholder
 
             t0 = time.perf_counter() if self._timing_enabled else 0.0
-            if self._use_tile_buffer and hasattr(self._rust_scheduler, "get_tile_buffer"):
+            tile_data = None
+            if self._tile_mode == "jpeg":
+                tile_data = self._rust_scheduler.get_tile_jpeg(level, col, row)
+            elif self._use_tile_buffer and hasattr(self._rust_scheduler, "get_tile_buffer"):
                 tile_data = self._rust_scheduler.get_tile_buffer(level, col, row)
             else:
                 tile_data = self._rust_scheduler.get_tile(level, col, row)
@@ -133,15 +145,41 @@ class TileImageProvider(QQuickImageProvider):
                 return self._placeholder
 
             logger.debug("Tile loaded: level=%d col=%d row=%d", level, col, row)
-            data, width, height = tile_data
-            # Convert raw RGB bytes to QImage
-            image = QImage(
-                data,
-                width,
-                height,
-                width * RGB_BYTES_PER_PIXEL,
-                QImage.Format.Format_RGB888,
-            )
+            if self._tile_mode == "jpeg":
+                image = QImage.fromData(tile_data, "JPG")
+                if image.isNull():
+                    logger.warning(
+                        "JPEG decode failed: level=%d col=%d row=%d - falling back to RGB path",
+                        level,
+                        col,
+                        row,
+                    )
+                    if self._use_tile_buffer and hasattr(
+                        self._rust_scheduler, "get_tile_buffer"
+                    ):
+                        rgb = self._rust_scheduler.get_tile_buffer(level, col, row)
+                    else:
+                        rgb = self._rust_scheduler.get_tile(level, col, row)
+                    if rgb is None:
+                        return self._placeholder
+                    data, width, height = rgb
+                    image = QImage(
+                        data,
+                        width,
+                        height,
+                        width * RGB_BYTES_PER_PIXEL,
+                        QImage.Format.Format_RGB888,
+                    )
+            else:
+                data, width, height = tile_data
+                # Convert raw RGB bytes to QImage
+                image = QImage(
+                    data,
+                    width,
+                    height,
+                    width * RGB_BYTES_PER_PIXEL,
+                    QImage.Format.Format_RGB888,
+                )
             t2 = time.perf_counter() if self._timing_enabled else 0.0
             if self._force_qimage_copy:
                 image = image.copy()

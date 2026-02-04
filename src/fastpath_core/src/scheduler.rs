@@ -40,6 +40,25 @@ fn tile_timing_enabled() -> bool {
     std::env::var("FASTPATH_TILE_TIMING").is_ok_and(|v| v == "1" || v == "true")
 }
 
+/// Check if the viewer is configured to request JPEG tiles (decoded by Qt).
+fn tile_mode_is_jpeg() -> bool {
+    std::env::var("FASTPATH_TILE_MODE").is_ok_and(|v| v.eq_ignore_ascii_case("jpeg"))
+}
+
+/// Check if viewport prefetch should decode tiles into L1 (decoded RGB).
+///
+/// If FASTPATH_PREFETCH_DECODE is set, it takes precedence.
+/// Otherwise, default is:
+/// - RGB mode: decode (true)
+/// - JPEG mode: don't decode (false), only warm L2
+fn prefetch_decode_enabled() -> bool {
+    if let Ok(v) = std::env::var("FASTPATH_PREFETCH_DECODE") {
+        let v = v.trim().to_lowercase();
+        return v == "1" || v == "true" || v == "yes";
+    }
+    !tile_mode_is_jpeg()
+}
+
 /// High-performance tile scheduler with caching and prefetching.
 pub struct TileScheduler {
     /// L1 tile cache (decoded RGB).
@@ -62,6 +81,8 @@ pub struct TileScheduler {
     bulk_preloader: BulkPreloader,
     /// Whether per-tile timing is enabled (cached from FASTPATH_TILE_TIMING env var).
     tile_timing: bool,
+    /// Whether viewport prefetch decodes tiles into L1 (cached from env vars).
+    prefetch_decode: bool,
 }
 
 impl TileScheduler {
@@ -98,6 +119,7 @@ impl TileScheduler {
             active_slide_id: AtomicU64::new(0),
             bulk_preloader,
             tile_timing: tile_timing_enabled(),
+            prefetch_decode: prefetch_decode_enabled(),
         }
     }
 
@@ -242,6 +264,35 @@ impl TileScheduler {
                 None
             }
         }
+    }
+
+    /// Read compressed JPEG and write-through to L2 (no RGB decode).
+    ///
+    /// Used by the foreground `get_tile_jpeg()` disk path.
+    fn load_tile_into_l2(&self, coord: &TileCoord, pack: &TilePack) -> Option<bytes::Bytes> {
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
+
+        let tile_ref = pack.tile_ref(coord.level, coord.col, coord.row)?;
+
+        let jpeg_bytes = match pack.read_tile_bytes(tile_ref) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                Self::log_tile_error("", coord, &e);
+                return None;
+            }
+        };
+
+        if slide_id != 0 {
+            let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+            let compressed = CompressedTileData {
+                jpeg_bytes: jpeg_bytes.clone(),
+                width: 0,
+                height: 0,
+            };
+            self.l2_cache.insert(l2_coord, compressed);
+        }
+
+        Some(jpeg_bytes)
     }
 
     /// Decode a tile for prefetch, respecting generation to discard stale work.
@@ -401,6 +452,29 @@ impl TileScheduler {
         self.load_tile_into_cache(&coord, &entry.pack)
     }
 
+    /// Get a tile as raw JPEG bytes (compressed).
+    ///
+    /// Returns None if the tile doesn't exist or slide isn't loaded.
+    pub fn get_tile_jpeg(&self, level: u32, col: u32, row: u32) -> Option<bytes::Bytes> {
+        // L2 hit
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
+        if slide_id != 0 {
+            let l2_coord = SlideTileCoord::new(slide_id, level, col, row);
+            if let Some(compressed) = self.l2_cache.get(&l2_coord) {
+                return Some(compressed.jpeg_bytes);
+            }
+        }
+
+        // Load from pack (write-through to L2)
+        let entry = {
+            let slide = self.slide.read();
+            Arc::clone(slide.as_ref()?)
+        };
+
+        let coord = TileCoord::new(level, col, row);
+        self.load_tile_into_l2(&coord, &entry.pack)
+    }
+
     /// Update viewport and trigger prefetching.
     #[allow(clippy::too_many_arguments)]
     pub fn update_viewport(
@@ -414,7 +488,11 @@ impl TileScheduler {
         velocity_y: f64,
     ) {
         let viewport = Viewport::new(x, y, width, height, scale, velocity_x, velocity_y);
-        self.prefetch_for_viewport(&viewport);
+        if self.prefetch_decode {
+            self.prefetch_for_viewport(&viewport);
+        } else {
+            self.prefetch_for_viewport_compressed(&viewport);
+        }
     }
 
     /// Prefetch tiles for a viewport.
@@ -480,6 +558,142 @@ impl TileScheduler {
         });
     }
 
+    /// Prefetch tiles for a viewport by warming L2 only (no RGB decode, no L1 insert).
+    fn prefetch_for_viewport_compressed(&self, viewport: &Viewport) {
+        let batch_generation = self.generation.load(Ordering::Acquire);
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
+        if slide_id == 0 {
+            return;
+        }
+
+        let slide = self.slide.read();
+        let Some(state) = slide.as_ref() else {
+            return;
+        };
+        let state = Arc::clone(state);
+
+        // Get visible tiles first (priority)
+        let visible_tiles = self.prefetch_calc.visible_tiles(&state.metadata, viewport);
+        let visible_uncached: Vec<_> = visible_tiles
+            .into_iter()
+            .filter(|coord| {
+                let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+                !self.l2_cache.contains(&l2_coord)
+            })
+            .collect();
+
+        // Get all tiles to prefetch (includes visible + extended viewport)
+        let all_tiles = self.prefetch_calc.prefetch_tiles(
+            &state.metadata,
+            viewport,
+            &|coord| {
+                let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+                self.l2_cache.contains(&l2_coord)
+            },
+        );
+
+        let visible_count = visible_uncached.len().min(MAX_VISIBLE_TILES);
+        let extended_budget =
+            EXTENDED_TILE_BUDGET.saturating_sub(visible_count.min(EXTENDED_TILE_BUDGET));
+
+        let target = visible_count + extended_budget;
+        let mut tiles_to_load = Vec::with_capacity(target);
+        tiles_to_load.extend(visible_uncached.into_iter().take(visible_count));
+
+        if tiles_to_load.len() < target {
+            tiles_to_load.extend(
+                all_tiles
+                    .into_iter()
+                    .skip(visible_count)
+                    .take(target - tiles_to_load.len()),
+            );
+        }
+
+        if tiles_to_load.is_empty() {
+            return;
+        }
+
+        // Drop the lock before parallel loading
+        drop(slide);
+        let pack = &state.pack;
+
+        // Load JPEG bytes in parallel (generation-checked)
+        tiles_to_load.par_iter().for_each(|coord| {
+            self.load_tile_jpeg_for_prefetch(coord, pack, slide_id, batch_generation);
+        });
+    }
+
+    /// Prefetch helper: read tile JPEG bytes into L2 (no decode).
+    fn load_tile_jpeg_for_prefetch(
+        &self,
+        coord: &TileCoord,
+        pack: &TilePack,
+        slide_id: u64,
+        batch_generation: u64,
+    ) -> bool {
+        // Check 1: quick exit before touching the in-flight set
+        if self.generation.load(Ordering::Acquire) != batch_generation {
+            return false;
+        }
+
+        // L2 hit: nothing to do
+        if slide_id != 0 {
+            let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+            if self.l2_cache.contains(&l2_coord) {
+                return false;
+            }
+        }
+
+        // Claim this coord in the in-flight set (dedup disk reads)
+        {
+            let mut flight = self.in_flight.lock();
+
+            // Check 2: generation may have changed while waiting for lock
+            if self.generation.load(Ordering::Acquire) != batch_generation {
+                return false;
+            }
+
+            if !flight.insert(*coord) {
+                return false;
+            }
+        }
+
+        let tile_ref = match pack.tile_ref(coord.level, coord.col, coord.row) {
+            Some(tile_ref) => tile_ref,
+            None => {
+                self.clear_in_flight_for_generation(coord, batch_generation);
+                return false;
+            }
+        };
+
+        let jpeg_bytes = match pack.read_tile_bytes(tile_ref) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                Self::log_tile_error("", coord, &e);
+                self.clear_in_flight_for_generation(coord, batch_generation);
+                return false;
+            }
+        };
+
+        // Only insert if the current slide_id still matches what we captured,
+        // preventing stale prefetch threads from filling L2 while the user has moved on.
+        let current_slide_id = self.active_slide_id.load(Ordering::Acquire);
+        let mut inserted = false;
+        if slide_id != 0 && current_slide_id == slide_id {
+            let l2_coord = SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+            let compressed = CompressedTileData {
+                jpeg_bytes,
+                width: 0,
+                height: 0,
+            };
+            self.l2_cache.insert(l2_coord, compressed);
+            inserted = true;
+        }
+
+        self.clear_in_flight_for_generation(coord, batch_generation);
+        inserted
+    }
+
     /// Pre-warm cache with ALL tiles from levels that have few tiles.
     /// This ensures any initial viewport zoom has tiles ready.
     /// Prefetches all levels where total_tiles <= MAX_TILES_PER_LEVEL.
@@ -491,6 +705,7 @@ impl TileScheduler {
         const MAX_TILES_PER_LEVEL: u32 = 64;
 
         let batch_generation = self.generation.load(Ordering::Acquire);
+        let slide_id = self.active_slide_id.load(Ordering::Acquire);
 
         let slide = self.slide.read();
         let Some(state) = slide.as_ref() else { return };
@@ -528,22 +743,45 @@ impl TileScheduler {
 
         let loaded = std::sync::atomic::AtomicUsize::new(0);
         let failed = std::sync::atomic::AtomicUsize::new(0);
+        let skipped = std::sync::atomic::AtomicUsize::new(0);
 
-        all_coords.par_iter().for_each(|coord| {
-            // Skip tiles already in cache — only count fresh loads
-            if self.cache.contains(coord) {
+        if self.prefetch_decode {
+            all_coords.par_iter().for_each(|coord| {
+                // Skip tiles already in cache — only count fresh loads
+                if self.cache.contains(coord) {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                if self.load_tile_for_prefetch(coord, pack, batch_generation).is_some() {
+                    loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        } else {
+            if slide_id == 0 {
                 return;
             }
-            if self.load_tile_for_prefetch(coord, pack, batch_generation).is_some() {
-                loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
+            all_coords.par_iter().for_each(|coord| {
+                // Skip tiles already in L2 — only count fresh inserts
+                let l2_coord =
+                    SlideTileCoord::new(slide_id, coord.level, coord.col, coord.row);
+                if self.l2_cache.contains(&l2_coord) {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                if self.load_tile_jpeg_for_prefetch(coord, pack, slide_id, batch_generation) {
+                    loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
 
         eprintln!(
-            "[PREFETCH] Done: {} loaded, {} failed",
+            "[PREFETCH] Done: {} loaded, {} skipped, {} failed",
             loaded.load(std::sync::atomic::Ordering::Relaxed),
+            skipped.load(std::sync::atomic::Ordering::Relaxed),
             failed.load(std::sync::atomic::Ordering::Relaxed)
         );
     }

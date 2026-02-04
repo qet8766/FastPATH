@@ -110,6 +110,23 @@ class TestRustTileScheduler:
         # Ensure buffer is readable
         assert mv[0] >= 0
 
+    def test_get_tile_jpeg(self, loaded_scheduler):
+        """Test getting a tile as compressed JPEG bytes."""
+        stats = loaded_scheduler.cache_stats()
+        assert stats["num_tiles"] == 0
+        assert stats["l2_num_tiles"] == 0
+
+        jpeg = loaded_scheduler.get_tile_jpeg(0, 0, 0)
+        assert jpeg is not None
+        assert isinstance(jpeg, bytes)
+        # JPEG SOI marker
+        assert jpeg[:2] == b"\xff\xd8"
+
+        stats = loaded_scheduler.cache_stats()
+        # JPEG path should warm L2 only (no decoded insert into L1).
+        assert stats["num_tiles"] == 0
+        assert stats["l2_num_tiles"] == 1
+
     def test_get_tile_not_exists(self, loaded_scheduler):
         """Test getting a tile that doesn't exist."""
         # Try to get a tile outside the grid

@@ -142,6 +142,25 @@ impl RustTileScheduler {
         Ok(Some((buf.into_bound(py), width, height)))
     }
 
+    /// Get a tile as raw JPEG bytes (compressed).
+    ///
+    /// This is useful for letting Qt decode tiles (`QImage.fromData(...)`) and
+    /// reducing Python<->Rust transfer bandwidth.
+    ///
+    /// Returns:
+    ///     JPEG bytes or None if tile doesn't exist.
+    fn get_tile_jpeg<'py>(
+        &self,
+        py: Python<'py>,
+        level: u32,
+        col: u32,
+        row: u32,
+    ) -> Option<Bound<'py, PyBytes>> {
+        self.inner
+            .get_tile_jpeg(level, col, row)
+            .map(|jpeg| PyBytes::new(py, jpeg.as_ref()))
+    }
+
     /// Update the viewport and trigger prefetching.
     ///
     /// Call this whenever the viewport changes to enable intelligent prefetching
