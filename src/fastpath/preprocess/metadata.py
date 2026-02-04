@@ -66,14 +66,19 @@ def check_pyramid_status(pyramid_dir: Path) -> PyramidStatus:
                 return PyramidStatus.CORRUPTED
 
         # Validate tile format
-        if metadata.get("tile_format") != "pack_v1":
+        if metadata.get("tile_format") != "pack_v2":
             return PyramidStatus.CORRUPTED
 
         # Check packed tile files
-        if not (pyramid_dir / "tiles.pack").exists():
+        tiles_dir = pyramid_dir / "tiles"
+        if not tiles_dir.exists():
             return PyramidStatus.INCOMPLETE
-        if not (pyramid_dir / "tiles.idx").exists():
-            return PyramidStatus.INCOMPLETE
+        for level_info in metadata["levels"]:
+            level = level_info["level"]
+            if not (tiles_dir / f"level_{level}.pack").exists():
+                return PyramidStatus.INCOMPLETE
+            if not (tiles_dir / f"level_{level}.idx").exists():
+                return PyramidStatus.INCOMPLETE
 
         # Check thumbnail exists
         if not (pyramid_dir / "thumbnail.jpg").exists():
@@ -99,7 +104,7 @@ class PyramidMetadata:
     levels: list[LevelInfo]
     background_color: tuple[int, int, int]
     preprocessed_at: str
-    tile_format: str = "pack_v1"
+    tile_format: str = "pack_v2"
 
     def to_dict(self) -> dict:
         return {
@@ -145,5 +150,5 @@ class PyramidMetadata:
             ],
             background_color=tuple(data["background_color"]),
             preprocessed_at=data["preprocessed_at"],
-            tile_format=data.get("tile_format", "pack_v1"),
+            tile_format=data.get("tile_format", "pack_v2"),
         )

@@ -72,64 +72,67 @@ class TestPreprocessIntegration:
     """Integration tests for the full preprocessing pipeline.
 
     Tests verify the packed format structure where:
-    - tiles.pack + tiles.idx contain the tile pyramid
+    - tiles/level_N.pack + tiles/level_N.idx contain the tile pyramid
     - Level 0 = lowest resolution (smallest)
     - Level N = highest resolution (largest)
     """
 
-    _PACK_HEADER = struct.Struct("<8sII")
-    _PACK_LEVEL = struct.Struct("<IIIQ")
-    _PACK_ENTRY = struct.Struct("<QII")
+    _PACK_HEADER = struct.Struct("<8sIHH")
+    _PACK_ENTRY = struct.Struct("<QI")
 
     def _read_index(self, idx_path: Path):
         data = idx_path.read_bytes()
-        magic, version, level_count = self._PACK_HEADER.unpack_from(data, 0)
-        assert magic == b"FPTIDX1\0"
+        magic, version, cols, rows = self._PACK_HEADER.unpack_from(data, 0)
+        assert magic == b"FPLIDX1\0"
         assert version == 1
-        entries_base = self._PACK_HEADER.size + level_count * self._PACK_LEVEL.size
-        levels = {}
-        for i in range(level_count):
-            level, cols, rows, entry_offset = self._PACK_LEVEL.unpack_from(
-                data, self._PACK_HEADER.size + i * self._PACK_LEVEL.size
+        entries = []
+        entry_base = self._PACK_HEADER.size
+        for i in range(cols * rows):
+            offset, length = self._PACK_ENTRY.unpack_from(
+                data, entry_base + i * self._PACK_ENTRY.size
             )
-            levels[level] = (cols, rows, entry_offset)
-        return data, entries_base, levels
+            entries.append((offset, length))
+        return cols, rows, entries
 
     def test_mock_fastpath_structure(self, mock_fastpath_dir: Path):
         """Verify mock fastpath directory has correct pack structure."""
         assert mock_fastpath_dir.exists()
         assert (mock_fastpath_dir / "metadata.json").exists()
         assert (mock_fastpath_dir / "thumbnail.jpg").exists()
-        assert (mock_fastpath_dir / "tiles.pack").exists()
-        assert (mock_fastpath_dir / "tiles.idx").exists()
+        tiles_dir = mock_fastpath_dir / "tiles"
+        assert tiles_dir.exists()
+        assert (tiles_dir / "level_0.pack").exists()
+        assert (tiles_dir / "level_0.idx").exists()
         assert (mock_fastpath_dir / "annotations" / "default.geojson").exists()
 
         # Check metadata has pack format marker
         with open(mock_fastpath_dir / "metadata.json") as f:
             metadata = json.load(f)
-        assert metadata.get("tile_format") == "pack_v1"
+        assert metadata.get("tile_format") == "pack_v2"
 
     def test_highest_res_tiles_exist(self, mock_fastpath_dir: Path):
         """Level 2 (highest resolution) should have 4x4 tiles."""
-        data, entries_base, levels = self._read_index(mock_fastpath_dir / "tiles.idx")
-        cols, rows, entry_offset = levels[2]
+        cols, rows, entries = self._read_index(
+            mock_fastpath_dir / "tiles" / "level_2.idx"
+        )
         assert cols * rows == 16
 
-        entry_start = entries_base + entry_offset
-        entries = []
-        for i in range(cols * rows):
-            offset, length, _ = self._PACK_ENTRY.unpack_from(
-                data, entry_start + i * self._PACK_ENTRY.size
-            )
-            entries.append((offset, length))
         assert all(length > 0 for _, length in entries)
 
     def test_pyramid_levels_increase(self, mock_fastpath_dir: Path):
         """Higher level numbers should have more tiles (larger resolution)."""
-        _data, _entries_base, levels = self._read_index(mock_fastpath_dir / "tiles.idx")
-        level0 = levels[0][0] * levels[0][1]
-        level1 = levels[1][0] * levels[1][1]
-        level2 = levels[2][0] * levels[2][1]
+        l0_cols, l0_rows, _ = self._read_index(
+            mock_fastpath_dir / "tiles" / "level_0.idx"
+        )
+        l1_cols, l1_rows, _ = self._read_index(
+            mock_fastpath_dir / "tiles" / "level_1.idx"
+        )
+        l2_cols, l2_rows, _ = self._read_index(
+            mock_fastpath_dir / "tiles" / "level_2.idx"
+        )
+        level0 = l0_cols * l0_rows
+        level1 = l1_cols * l1_rows
+        level2 = l2_cols * l2_rows
 
         # Higher level numbers have more tiles
         assert level2 > level1 > level0

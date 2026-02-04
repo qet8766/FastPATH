@@ -55,7 +55,7 @@ class SlideManager(QObject):
             with open(metadata_path) as f:
                 metadata = json.load(f)
 
-            if metadata.get("tile_format") != "pack_v1":
+            if metadata.get("tile_format") != "pack_v2":
                 logger.error(
                     "Unsupported tile_format in metadata: %s",
                     metadata.get("tile_format"),

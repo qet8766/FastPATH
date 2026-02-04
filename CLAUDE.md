@@ -91,8 +91,8 @@ The `CACHE_MISS_THRESHOLD = 0.3` in `config.py` controls tile visibility: if >30
 
 Always **0.5 MPP** (20x equivalent), **JPEG Q80**, via pyvips `dzsave()`. These are hardcoded — not configurable.
 
-- Layout: `tiles.pack` + `tiles.idx` (packed tiles) — level 0 = lowest resolution, level N = highest resolution
-- Metadata includes `"tile_format": "pack_v1"`
+- Layout: `tiles/level_N.pack` + `tiles/level_N.idx` (packed tiles) — level 0 = lowest resolution, level N = highest resolution
+- Metadata includes `"tile_format": "pack_v2"`
 - `getLevelForScale(scale)`: picks highest level where `downsample <= 1/scale`
 
 CLI options: `--tile-size/-t` (64-2048, default 512), `--parallel-slides/-p` (default 3), `--force/-f` (rebuild). Input can be a single WSI file or a directory.

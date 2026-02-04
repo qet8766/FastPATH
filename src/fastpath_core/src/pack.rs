@@ -1,4 +1,4 @@
-//! Packed tile reader for .fastpath directories.
+//! Packed tile reader for .fastpath directories (pack_v2).
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -8,116 +8,166 @@ use bytes::Bytes;
 
 use crate::error::{TileError, TileResult};
 
-const MAGIC: &[u8; 8] = b"FPTIDX1\0";
-const VERSION: u32 = 1;
-const HEADER_SIZE: usize = 16;
-const LEVEL_SIZE: usize = 20;
-const ENTRY_SIZE: usize = 16;
+const LEVEL_MAGIC: &[u8; 8] = b"FPLIDX1\0";
+const LEVEL_VERSION: u32 = 1;
+const LEVEL_HEADER_SIZE: usize = 16;
+const LEVEL_ENTRY_SIZE: usize = 12;
 
-#[derive(Debug, Clone)]
-pub struct PackLevel {
-    pub level: u32,
-    pub cols: u32,
-    pub rows: u32,
-    pub entry_offset: u64,
+#[derive(Debug, Clone, Copy)]
+struct TileEntry {
+    offset: u64,
+    length: u32,
+}
+
+#[derive(Debug)]
+struct LevelPack {
+    level: u32,
+    cols: u32,
+    rows: u32,
+    entries: Vec<TileEntry>,
+    pack: File,
+    pack_len: u64,
+}
+
+impl LevelPack {
+    fn parse(level: u32, idx_bytes: &[u8], pack: File, pack_len: u64) -> TileResult<Self> {
+        if idx_bytes.len() < LEVEL_HEADER_SIZE {
+            return Err(TileError::Validation(format!(
+                "level_{}.idx is too small",
+                level
+            )));
+        }
+
+        let magic = &idx_bytes[0..8];
+        if magic != LEVEL_MAGIC {
+            return Err(TileError::Validation(format!(
+                "level_{}.idx magic mismatch",
+                level
+            )));
+        }
+
+        let version = u32::from_le_bytes(idx_bytes[8..12].try_into().unwrap());
+        if version != LEVEL_VERSION {
+            return Err(TileError::Validation(format!(
+                "Unsupported level_{}.idx version: {}",
+                level, version
+            )));
+        }
+
+        let cols = u16::from_le_bytes(idx_bytes[12..14].try_into().unwrap()) as u32;
+        let rows = u16::from_le_bytes(idx_bytes[14..16].try_into().unwrap()) as u32;
+        if cols == 0 || rows == 0 {
+            return Err(TileError::Validation(format!(
+                "level_{}.idx has zero cols/rows",
+                level
+            )));
+        }
+
+        let entry_count = (cols as u64).saturating_mul(rows as u64);
+        let entries_bytes = entry_count
+            .checked_mul(LEVEL_ENTRY_SIZE as u64)
+            .ok_or_else(|| {
+                TileError::Validation(format!("level_{}.idx entry table overflow", level))
+            })?;
+        let expected_len = LEVEL_HEADER_SIZE as u64 + entries_bytes;
+        if (idx_bytes.len() as u64) < expected_len {
+            return Err(TileError::Validation(format!(
+                "level_{}.idx missing entry table",
+                level
+            )));
+        }
+
+        let mut entries = Vec::with_capacity(entry_count as usize);
+        let mut cursor = LEVEL_HEADER_SIZE;
+        for _ in 0..entry_count {
+            let offset = u64::from_le_bytes(idx_bytes[cursor..cursor + 8].try_into().unwrap());
+            let length =
+                u32::from_le_bytes(idx_bytes[cursor + 8..cursor + 12].try_into().unwrap());
+            entries.push(TileEntry { offset, length });
+            cursor += LEVEL_ENTRY_SIZE;
+        }
+
+        Ok(Self {
+            level,
+            cols,
+            rows,
+            entries,
+            pack,
+            pack_len,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PackTileRef {
+    pub level: u32,
     pub offset: u64,
     pub length: u32,
 }
 
 #[derive(Debug)]
 pub struct TilePack {
-    pack: File,
-    levels: Vec<PackLevel>,
-    index_bytes: Vec<u8>,
-    entries_base: u64,
-    pack_len: u64,
+    levels: Vec<LevelPack>,
 }
 
 impl TilePack {
     pub fn open(fastpath_dir: &Path) -> TileResult<Self> {
-        let idx_path = fastpath_dir.join("tiles.idx");
-        let pack_path = fastpath_dir.join("tiles.pack");
-
-        let index_bytes = std::fs::read(&idx_path)?;
-        let (levels, entries_base) = Self::parse_index(&index_bytes)?;
-
-        let pack = File::open(&pack_path)?;
-        let pack_len = pack.metadata()?.len();
-
-        Ok(Self {
-            pack,
-            levels,
-            index_bytes,
-            entries_base,
-            pack_len,
-        })
-    }
-
-    fn parse_index(index_bytes: &[u8]) -> TileResult<(Vec<PackLevel>, u64)> {
-        if index_bytes.len() < HEADER_SIZE {
-            return Err(TileError::Validation("tiles.idx is too small".into()));
-        }
-
-        let magic = &index_bytes[0..8];
-        if magic != MAGIC {
-            return Err(TileError::Validation("tiles.idx magic mismatch".into()));
-        }
-
-        let version = u32::from_le_bytes(index_bytes[8..12].try_into().unwrap());
-        if version != VERSION {
+        let tiles_dir = fastpath_dir.join("tiles");
+        if !tiles_dir.exists() {
             return Err(TileError::Validation(format!(
-                "Unsupported tiles.idx version: {}",
-                version
+                "Missing tiles directory: {}",
+                tiles_dir.display()
             )));
         }
 
-        let level_count = u32::from_le_bytes(index_bytes[12..16].try_into().unwrap()) as usize;
-        if level_count == 0 {
-            return Err(TileError::Validation("tiles.idx has no levels".into()));
-        }
-
-        let levels_bytes_len = level_count * LEVEL_SIZE;
-        if index_bytes.len() < HEADER_SIZE + levels_bytes_len {
-            return Err(TileError::Validation("tiles.idx missing level table".into()));
-        }
-
-        let entries_base = (HEADER_SIZE + levels_bytes_len) as u64;
-        let entries_len = index_bytes.len() as u64 - entries_base;
-
-        let mut levels = Vec::with_capacity(level_count);
-        for i in 0..level_count {
-            let base = HEADER_SIZE + i * LEVEL_SIZE;
-            let level = u32::from_le_bytes(index_bytes[base..base + 4].try_into().unwrap());
-            let cols = u32::from_le_bytes(index_bytes[base + 4..base + 8].try_into().unwrap());
-            let rows = u32::from_le_bytes(index_bytes[base + 8..base + 12].try_into().unwrap());
-            let entry_offset =
-                u64::from_le_bytes(index_bytes[base + 12..base + 20].try_into().unwrap());
-
-            let entry_count = (cols as u64).saturating_mul(rows as u64);
-            let level_end = entry_offset + entry_count * ENTRY_SIZE as u64;
-            if level_end > entries_len {
-                return Err(TileError::Validation(format!(
-                    "tiles.idx entry range out of bounds for level {}",
-                    level
-                )));
+        let mut levels = Vec::new();
+        for entry in std::fs::read_dir(&tiles_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
             }
 
-            levels.push(PackLevel {
-                level,
-                cols,
-                rows,
-                entry_offset,
-            });
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(level_str) = name
+                .strip_prefix("level_")
+                .and_then(|s| s.strip_suffix(".idx"))
+            else {
+                continue;
+            };
+
+            let level: u32 = level_str.parse().map_err(|_| {
+                TileError::Validation(format!("Invalid level index: {}", level_str))
+            })?;
+
+            let idx_bytes = std::fs::read(entry.path())?;
+            let pack_path = tiles_dir.join(format!("level_{}.pack", level));
+            let pack = File::open(&pack_path)?;
+            let pack_len = pack.metadata()?.len();
+
+            let level_pack = LevelPack::parse(level, &idx_bytes, pack, pack_len)?;
+            levels.push(level_pack);
         }
 
-        Ok((levels, entries_base))
+        if levels.is_empty() {
+            return Err(TileError::Validation(
+                "No level index files found in tiles/".into(),
+            ));
+        }
+
+        levels.sort_by_key(|l| l.level);
+        for i in 1..levels.len() {
+            if levels[i].level == levels[i - 1].level {
+                return Err(TileError::Validation(format!(
+                    "Duplicate level index: {}",
+                    levels[i].level
+                )));
+            }
+        }
+        Ok(Self { levels })
     }
 
-    fn find_level(&self, level: u32) -> Option<&PackLevel> {
+    fn find_level(&self, level: u32) -> Option<&LevelPack> {
         self.levels.iter().find(|info| info.level == level)
     }
 
@@ -128,21 +178,16 @@ impl TilePack {
         }
 
         let idx = (row as u64).saturating_mul(info.cols as u64) + col as u64;
-        let entry_offset = self.entries_base + info.entry_offset + idx * ENTRY_SIZE as u64;
-        if entry_offset + ENTRY_SIZE as u64 > self.index_bytes.len() as u64 {
+        let entry = info.entries.get(idx as usize)?;
+        if entry.length == 0 {
             return None;
         }
 
-        let start = entry_offset as usize;
-        let offset = u64::from_le_bytes(self.index_bytes[start..start + 8].try_into().unwrap());
-        let length =
-            u32::from_le_bytes(self.index_bytes[start + 8..start + 12].try_into().unwrap());
-
-        if length == 0 {
-            return None;
-        }
-
-        Some(PackTileRef { offset, length })
+        Some(PackTileRef {
+            level,
+            offset: entry.offset,
+            length: entry.length,
+        })
     }
 
     pub fn read_tile_bytes(&self, tile_ref: PackTileRef) -> TileResult<Bytes> {
@@ -150,28 +195,33 @@ impl TilePack {
             return Err(TileError::Validation("zero-length tile".into()));
         }
 
+        let level = self.find_level(tile_ref.level).ok_or_else(|| {
+            TileError::Validation(format!("Unknown level {}", tile_ref.level))
+        })?;
+
         let end = tile_ref
             .offset
             .checked_add(tile_ref.length as u64)
             .ok_or_else(|| TileError::Validation("tile offset overflow".into()))?;
-        if end > self.pack_len {
+        if end > level.pack_len {
             return Err(TileError::Validation(
                 "tile byte range exceeds pack size".into(),
             ));
         }
 
         let mut buf = vec![0u8; tile_ref.length as usize];
-        read_at(&self.pack, tile_ref.offset, &mut buf)?;
+        read_at(&level.pack, tile_ref.offset, &mut buf)?;
         Ok(Bytes::from(buf))
     }
 }
 
-/// Pack dzsave output (tiles_files) into tiles.pack/tiles.idx and remove dzsave files.
+/// Pack dzsave output (tiles_files) into per-level tiles/level_N.pack + level_N.idx
+/// and remove dzsave files.
 ///
 /// The dzsave layout is expected to be:
 /// `fastpath_dir/tiles_files/<level>/<col>_<row>.jpg` (or `.jpeg`).
 ///
-/// Missing tiles are written as zero-length entries, matching the Python packer behavior.
+/// Missing tiles are written as zero-length entries.
 pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> TileResult<()> {
     let tiles_dir = fastpath_dir.join("tiles_files");
     if !tiles_dir.exists() {
@@ -181,37 +231,9 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
         )));
     }
 
-    let pack_path = fastpath_dir.join("tiles.pack");
-    let idx_path = fastpath_dir.join("tiles.idx");
+    let out_dir = fastpath_dir.join("tiles");
+    std::fs::create_dir_all(&out_dir)?;
 
-    let pack_file = File::create(&pack_path)?;
-    let idx_file = File::create(&idx_path)?;
-    let mut pack_writer = BufWriter::new(pack_file);
-    let mut idx_writer = BufWriter::new(idx_file);
-
-    idx_writer.write_all(MAGIC)?;
-    idx_writer.write_all(&VERSION.to_le_bytes())?;
-    idx_writer.write_all(&(levels.len() as u32).to_le_bytes())?;
-
-    // Level table: entry_offset is relative to entries section (after header + level table).
-    let mut entry_offset: u64 = 0;
-    for (level, cols, rows) in levels {
-        idx_writer.write_all(&level.to_le_bytes())?;
-        idx_writer.write_all(&cols.to_le_bytes())?;
-        idx_writer.write_all(&rows.to_le_bytes())?;
-        idx_writer.write_all(&entry_offset.to_le_bytes())?;
-
-        let entry_count = (*cols as u64).saturating_mul(*rows as u64);
-        let level_bytes = entry_count
-            .checked_mul(ENTRY_SIZE as u64)
-            .ok_or_else(|| TileError::Validation("tiles.idx entry table overflow".into()))?;
-        entry_offset = entry_offset
-            .checked_add(level_bytes)
-            .ok_or_else(|| TileError::Validation("tiles.idx entry_offset overflow".into()))?;
-    }
-
-    // Entry table + packed bytes.
-    let mut pack_offset: u64 = 0;
     for (level, cols, rows) in levels {
         let level_dir = tiles_dir.join(level.to_string());
         if !level_dir.exists() {
@@ -221,6 +243,27 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
             )));
         }
 
+        let cols_u16 = u16::try_from(*cols).map_err(|_| {
+            TileError::Validation(format!("level {} cols exceeds u16: {}", level, cols))
+        })?;
+        let rows_u16 = u16::try_from(*rows).map_err(|_| {
+            TileError::Validation(format!("level {} rows exceeds u16: {}", level, rows))
+        })?;
+
+        let pack_path = out_dir.join(format!("level_{}.pack", level));
+        let idx_path = out_dir.join(format!("level_{}.idx", level));
+
+        let pack_file = File::create(&pack_path)?;
+        let idx_file = File::create(&idx_path)?;
+        let mut pack_writer = BufWriter::new(pack_file);
+        let mut idx_writer = BufWriter::new(idx_file);
+
+        idx_writer.write_all(LEVEL_MAGIC)?;
+        idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+        idx_writer.write_all(&cols_u16.to_le_bytes())?;
+        idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+        let mut pack_offset: u64 = 0;
         for row in 0..*rows {
             for col in 0..*cols {
                 let jpg = level_dir.join(format!("{}_{}.jpg", col, row));
@@ -236,7 +279,6 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
 
                 let Some(tile_path) = tile_path else {
                     idx_writer.write_all(&0u64.to_le_bytes())?;
-                    idx_writer.write_all(&0u32.to_le_bytes())?;
                     idx_writer.write_all(&0u32.to_le_bytes())?;
                     continue;
                 };
@@ -254,17 +296,16 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
 
                 idx_writer.write_all(&pack_offset.to_le_bytes())?;
                 idx_writer.write_all(&length.to_le_bytes())?;
-                idx_writer.write_all(&0u32.to_le_bytes())?;
 
                 pack_offset = pack_offset
                     .checked_add(length as u64)
-                    .ok_or_else(|| TileError::Validation("tiles.pack offset overflow".into()))?;
+                    .ok_or_else(|| TileError::Validation("pack offset overflow".into()))?;
             }
         }
-    }
 
-    idx_writer.flush()?;
-    pack_writer.flush()?;
+        idx_writer.flush()?;
+        pack_writer.flush()?;
+    }
 
     // Clean up dzsave output to save disk space.
     std::fs::remove_dir_all(&tiles_dir)?;
@@ -321,8 +362,10 @@ mod tests {
 
         assert!(!tiles_dir.exists(), "tiles_files should be removed");
         assert!(!dir.join("tiles.dzi").exists(), "tiles.dzi should be removed");
-        assert!(dir.join("tiles.pack").exists());
-        assert!(dir.join("tiles.idx").exists());
+        assert!(dir.join("tiles").join("level_0.pack").exists());
+        assert!(dir.join("tiles").join("level_0.idx").exists());
+        assert!(dir.join("tiles").join("level_1.pack").exists());
+        assert!(dir.join("tiles").join("level_1.idx").exists());
 
         let pack = TilePack::open(dir).unwrap();
 

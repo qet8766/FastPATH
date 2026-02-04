@@ -9,9 +9,8 @@ use bytes::Bytes;
 use crate::cache::compute_slide_id;
 use crate::decoder::CompressedTileData;
 
-const PACK_MAGIC: &[u8; 8] = b"FPTIDX1\0";
-const PACK_VERSION: u32 = 1;
-const PACK_ENTRY_SIZE: u64 = 16;
+const LEVEL_MAGIC: &[u8; 8] = b"FPLIDX1\0";
+const LEVEL_VERSION: u32 = 1;
 
 /// Minimal valid 1x1 white JPEG byte array (JFIF baseline).
 #[rustfmt::skip]
@@ -84,52 +83,42 @@ pub fn test_compressed_tile() -> CompressedTileData {
 }
 
 fn write_test_pack(dir: &Path, levels: &[(u32, u32, u32)], with_tiles: bool) {
-    let pack_path = dir.join("tiles.pack");
-    let idx_path = dir.join("tiles.idx");
+    let tiles_dir = dir.join("tiles");
+    fs::create_dir_all(&tiles_dir).unwrap();
 
     let tile_bytes = test_jpeg_bytes();
 
-    let mut pack_file = fs::File::create(&pack_path).unwrap();
-    let mut entries_by_level: Vec<(u32, u32, u32, Vec<(u64, u32)>)> = Vec::new();
-    let mut offset = 0u64;
-
     for (level, cols, rows) in levels {
-        let mut entries = Vec::with_capacity((*cols as usize) * (*rows as usize));
+        let pack_path = tiles_dir.join(format!("level_{}.pack", level));
+        let idx_path = tiles_dir.join(format!("level_{}.idx", level));
+
+        let mut pack_file = fs::File::create(&pack_path).unwrap();
+        let mut idx_file = fs::File::create(&idx_path).unwrap();
+
+        idx_file.write_all(LEVEL_MAGIC).unwrap();
+        idx_file.write_all(&LEVEL_VERSION.to_le_bytes()).unwrap();
+        idx_file
+            .write_all(&u16::try_from(*cols).unwrap().to_le_bytes())
+            .unwrap();
+        idx_file
+            .write_all(&u16::try_from(*rows).unwrap().to_le_bytes())
+            .unwrap();
+
+        let mut offset = 0u64;
         for _row in 0..*rows {
             for _col in 0..*cols {
                 if with_tiles {
                     pack_file.write_all(&tile_bytes).unwrap();
-                    entries.push((offset, tile_bytes.len() as u32));
+                    idx_file.write_all(&offset.to_le_bytes()).unwrap();
+                    idx_file
+                        .write_all(&(tile_bytes.len() as u32).to_le_bytes())
+                        .unwrap();
                     offset += tile_bytes.len() as u64;
                 } else {
-                    entries.push((0, 0));
+                    idx_file.write_all(&0u64.to_le_bytes()).unwrap();
+                    idx_file.write_all(&0u32.to_le_bytes()).unwrap();
                 }
             }
-        }
-        entries_by_level.push((*level, *cols, *rows, entries));
-    }
-
-    let mut idx_file = fs::File::create(&idx_path).unwrap();
-    idx_file.write_all(PACK_MAGIC).unwrap();
-    idx_file.write_all(&PACK_VERSION.to_le_bytes()).unwrap();
-    idx_file
-        .write_all(&(levels.len() as u32).to_le_bytes())
-        .unwrap();
-
-    let mut entry_offset = 0u64;
-    for (level, cols, rows, _entries) in &entries_by_level {
-        idx_file.write_all(&level.to_le_bytes()).unwrap();
-        idx_file.write_all(&cols.to_le_bytes()).unwrap();
-        idx_file.write_all(&rows.to_le_bytes()).unwrap();
-        idx_file.write_all(&entry_offset.to_le_bytes()).unwrap();
-        entry_offset += (*cols as u64) * (*rows as u64) * PACK_ENTRY_SIZE;
-    }
-
-    for (_level, _cols, _rows, entries) in entries_by_level {
-        for (offset, length) in entries {
-            idx_file.write_all(&offset.to_le_bytes()).unwrap();
-            idx_file.write_all(&length.to_le_bytes()).unwrap();
-            idx_file.write_all(&0u32.to_le_bytes()).unwrap();
         }
     }
 }
@@ -145,7 +134,7 @@ pub fn create_test_fastpath(dir: &Path) {
         ],
         "target_mpp": 0.5,
         "target_magnification": 20.0,
-        "tile_format": "pack_v1"
+        "tile_format": "pack_v2"
     }"#;
 
     fs::write(dir.join("metadata.json"), metadata).unwrap();
@@ -163,7 +152,7 @@ pub fn create_test_fastpath_with_tiles(dir: &Path) {
         ],
         "target_mpp": 0.5,
         "target_magnification": 20.0,
-        "tile_format": "pack_v1"
+        "tile_format": "pack_v2"
     }"#;
     fs::write(dir.join("metadata.json"), metadata).unwrap();
 

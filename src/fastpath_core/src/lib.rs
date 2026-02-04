@@ -320,7 +320,7 @@ impl RustTileScheduler {
     }
 }
 
-/// Pack dzsave output tiles_files into tiles.pack/tiles.idx.
+/// Pack dzsave output tiles_files into per-level tiles/level_N.pack + level_N.idx.
 ///
 /// Args:
 ///   path: Path to the .fastpath directory (must contain tiles_files from dzsave)
