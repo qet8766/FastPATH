@@ -196,10 +196,7 @@ impl TileScheduler {
         let slide_id = self.active_slide_id.load(Ordering::Acquire);
         let t0 = if self.tile_timing { Some(Instant::now()) } else { None };
 
-        let tile_ref = match pack.tile_ref(coord.level, coord.col, coord.row) {
-            Some(tile_ref) => tile_ref,
-            None => return None,
-        };
+        let tile_ref = pack.tile_ref(coord.level, coord.col, coord.row)?;
 
         // Step 1: Read compressed JPEG from pack
         let compressed = match pack.read_tile_bytes(tile_ref) {
@@ -451,19 +448,22 @@ impl TileScheduler {
         let extended_budget =
             EXTENDED_TILE_BUDGET.saturating_sub(visible_count.min(EXTENDED_TILE_BUDGET));
 
-        let mut tiles_to_load = Vec::with_capacity(visible_count + extended_budget);
+        let target = visible_count + extended_budget;
+        let mut tiles_to_load = Vec::with_capacity(target);
 
         // Add all visible tiles first (priority)
-        tiles_to_load.extend(visible_uncached.into_iter().take(MAX_VISIBLE_TILES));
+        tiles_to_load.extend(visible_uncached.into_iter().take(visible_count));
 
-        // Add extended tiles that aren't already in the list
-        for coord in all_tiles {
-            if tiles_to_load.len() >= visible_count + extended_budget {
-                break;
-            }
-            if !tiles_to_load.contains(&coord) {
-                tiles_to_load.push(coord);
-            }
+        // `prefetch_tiles()` returns tiles ordered by priority and starts with the
+        // same uncached-visible set we just added, so we can skip that prefix
+        // without doing an O(n^2) `contains()` scan here.
+        if tiles_to_load.len() < target {
+            tiles_to_load.extend(
+                all_tiles
+                    .into_iter()
+                    .skip(visible_count)
+                    .take(target - tiles_to_load.len()),
+            );
         }
 
         if tiles_to_load.is_empty() {

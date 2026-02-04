@@ -15,6 +15,7 @@ mod pack;
 mod prefetch;
 mod scheduler;
 mod slide_pool;
+mod tile_buffer;
 mod tile_reader;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -25,6 +26,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use scheduler::TileScheduler;
+use tile_buffer::TileBuffer;
 use tile_reader::FastpathTileReader;
 
 /// Python-exposed tile scheduler with two-level caching.
@@ -115,6 +117,29 @@ impl RustTileScheduler {
         self.inner.get_tile(level, col, row).map(|tile| {
             (PyBytes::new(py, &tile.data), tile.width, tile.height)
         })
+    }
+
+    /// Get a tile as a zero-copy buffer (Python buffer protocol).
+    ///
+    /// This avoids copying decoded RGB bytes into a Python `bytes` object.
+    /// QImage (PySide6) can wrap the returned `TileBuffer` directly.
+    ///
+    /// Returns:
+    ///     Tuple of (TileBuffer, width, height) or None if tile doesn't exist
+    fn get_tile_buffer<'py>(
+        &self,
+        py: Python<'py>,
+        level: u32,
+        col: u32,
+        row: u32,
+    ) -> PyResult<Option<(Bound<'py, TileBuffer>, u32, u32)>> {
+        let Some(tile) = self.inner.get_tile(level, col, row) else {
+            return Ok(None);
+        };
+        let width = tile.width;
+        let height = tile.height;
+        let buf = Py::new(py, TileBuffer::new(tile.data))?;
+        Ok(Some((buf.into_bound(py), width, height)))
     }
 
     /// Update the viewport and trigger prefetching.
@@ -297,6 +322,7 @@ fn is_debug_build() -> bool {
 #[pymodule]
 fn fastpath_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustTileScheduler>()?;
+    m.add_class::<TileBuffer>()?;
     m.add_class::<FastpathTileReader>()?;
     m.add_function(wrap_pyfunction!(pack_dzsave_tiles, m)?)?;
     m.add_function(wrap_pyfunction!(is_debug_build, m)?)?;

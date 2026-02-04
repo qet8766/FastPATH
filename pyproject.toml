@@ -19,8 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 ai = [
-    "torch>=2.0",
-    "torchvision>=0.15",
+    "torch>=2.0a0",
+    "torchvision>=0.15a0",
     "timm>=0.9",
     "scikit-image>=0.20",
     "opencv-python-headless>=4.8",
@@ -37,8 +37,8 @@ rust = [
     # Note: fastpath_core is built separately with maturin
 ]
 all = [
-    "torch>=2.0",
-    "torchvision>=0.15",
+    "torch>=2.0a0",
+    "torchvision>=0.15a0",
     "timm>=0.9",
     "scikit-image>=0.20",
     "opencv-python-headless>=4.8",
@@ -61,6 +61,19 @@ packages = ["src/fastpath"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.uv]
+prerelease = "allow"
+environments = ["sys_platform == 'win32'"]
+
+[[tool.uv.index]]
+name = "pytorch-nightly"
+url = "https://download.pytorch.org/whl/nightly/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-nightly" }]
+torchvision = [{ index = "pytorch-nightly" }]
 
 [dependency-groups]
 dev = [

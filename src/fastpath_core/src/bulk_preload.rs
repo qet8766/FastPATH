@@ -142,9 +142,9 @@ impl BulkPreloader {
                             }
 
                             let tile_ref = match pack.tile_ref(
-                                l2_coord.level,
-                                l2_coord.col,
-                                l2_coord.row,
+                                l2_coord.level(),
+                                l2_coord.col(),
+                                l2_coord.row(),
                             ) {
                                 Some(tile_ref) => tile_ref,
                                 None => {

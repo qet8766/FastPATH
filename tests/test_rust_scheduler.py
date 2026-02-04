@@ -100,6 +100,16 @@ class TestRustTileScheduler:
         # RGB data: width * height * 3 bytes
         assert len(data) == width * height * 3
 
+    def test_get_tile_buffer(self, loaded_scheduler):
+        """Test getting a tile as a zero-copy buffer."""
+        tile = loaded_scheduler.get_tile_buffer(0, 0, 0)
+        assert tile is not None
+        buf, width, height = tile
+        mv = memoryview(buf)
+        assert mv.nbytes == width * height * 3
+        # Ensure buffer is readable
+        assert mv[0] >= 0
+
     def test_get_tile_not_exists(self, loaded_scheduler):
         """Test getting a tile that doesn't exist."""
         # Try to get a tile outside the grid

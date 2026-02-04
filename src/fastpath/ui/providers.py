@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
@@ -60,6 +62,32 @@ class TileImageProvider(QQuickImageProvider):
         super().__init__(QQuickImageProvider.ImageType.Image)
         self._rust_scheduler = rust_scheduler
         self._placeholder = self._create_placeholder()
+        # `QImage(data, ...)` wraps the provided buffer. Copying forces QImage to
+        # own its pixels (safe but expensive). PySide6 keeps the Python buffer
+        # alive for the lifetime of the QImage, so skipping the copy avoids an
+        # extra full-tile memcpy per request.
+        # Default to the zero-copy Rust buffer path (if available). It can be
+        # disabled for debugging with FASTPATH_TILE_BUFFER=0.
+        tile_buf_env = os.environ.get("FASTPATH_TILE_BUFFER")
+        self._use_tile_buffer = (
+            True
+            if tile_buf_env is None
+            else tile_buf_env.strip().lower() in {"1", "true", "yes"}
+        )
+        self._force_qimage_copy = (
+            os.environ.get("FASTPATH_FORCE_QIMAGE_COPY", "").strip().lower()
+            in {"1", "true", "yes"}
+        )
+        self._timing_enabled = (
+            os.environ.get("FASTPATH_QIMAGE_TIMING", "").strip().lower()
+            in {"1", "true", "yes"}
+        )
+        self._timing_every = int(os.environ.get("FASTPATH_QIMAGE_TIMING_EVERY", "100"))
+        self._timing_lock = threading.Lock()
+        self._timing_count = 0
+        self._timing_rust_s = 0.0
+        self._timing_qimage_s = 0.0
+        self._timing_copy_s = 0.0
 
     def _create_placeholder(self) -> QImage:
         """Create a neutral placeholder image for loading tiles."""
@@ -91,7 +119,12 @@ class TileImageProvider(QQuickImageProvider):
             if not self._rust_scheduler.is_loaded:
                 return self._placeholder
 
-            tile_data = self._rust_scheduler.get_tile(level, col, row)
+            t0 = time.perf_counter() if self._timing_enabled else 0.0
+            if self._use_tile_buffer and hasattr(self._rust_scheduler, "get_tile_buffer"):
+                tile_data = self._rust_scheduler.get_tile_buffer(level, col, row)
+            else:
+                tile_data = self._rust_scheduler.get_tile(level, col, row)
+            t1 = time.perf_counter() if self._timing_enabled else 0.0
             if tile_data is None:
                 logger.warning(
                     "Tile request failed: level=%d col=%d row=%d - scheduler returned None (is_loaded=%s)",
@@ -109,11 +142,30 @@ class TileImageProvider(QQuickImageProvider):
                 width * RGB_BYTES_PER_PIXEL,
                 QImage.Format.Format_RGB888,
             )
-            # Make a copy since the data buffer may be reused
-            image = image.copy()
+            t2 = time.perf_counter() if self._timing_enabled else 0.0
+            if self._force_qimage_copy:
+                image = image.copy()
+            t3 = time.perf_counter() if self._timing_enabled else 0.0
+
+            if self._timing_enabled:
+                with self._timing_lock:
+                    self._timing_count += 1
+                    self._timing_rust_s += (t1 - t0)
+                    self._timing_qimage_s += (t2 - t1)
+                    self._timing_copy_s += (t3 - t2)
+                    if self._timing_count % self._timing_every == 0:
+                        n = self._timing_count
+                        logger.info(
+                            "TileImageProvider timing over %d tiles: rust=%.3fms qimage=%.3fms copy=%.3fms (avg)",
+                            n,
+                            (self._timing_rust_s / n) * 1000.0,
+                            (self._timing_qimage_s / n) * 1000.0,
+                            (self._timing_copy_s / n) * 1000.0,
+                        )
             return image
 
-        except (ValueError, IndexError):
+        except Exception:
+            logger.exception("TileImageProvider.requestImage failed: id=%r", id)
             return self._placeholder
 
 

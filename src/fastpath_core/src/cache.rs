@@ -34,20 +34,45 @@ impl fmt::Display for TileCoord {
 /// can coexist in the same cache without collisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlideTileCoord {
-    pub slide_id: u64,
-    pub level: u32,
-    pub col: u32,
-    pub row: u32,
+    slide_id: u64,
+    /// Packed as: level(16) | col(24) | row(24)
+    ///
+    /// This keeps the key at 16 bytes (vs 24 bytes with 3x u32 + padding),
+    /// improving hash table locality for large L2 caches.
+    coord: u64,
 }
 
 impl SlideTileCoord {
     pub fn new(slide_id: u64, level: u32, col: u32, row: u32) -> Self {
-        Self {
-            slide_id,
-            level,
-            col,
-            row,
-        }
+        // These bounds are extremely generous for WSI tiles.
+        // If violated, it's better to fail loudly than to risk key collisions.
+        assert!(level <= u16::MAX as u32, "level out of range: {level}");
+        assert!(col < (1 << 24), "col out of range: {col}");
+        assert!(row < (1 << 24), "row out of range: {row}");
+
+        let coord = ((level as u64) << 48) | ((col as u64) << 24) | (row as u64);
+        Self { slide_id, coord }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn slide_id(&self) -> u64 {
+        self.slide_id
+    }
+
+    #[inline]
+    pub fn level(&self) -> u32 {
+        (self.coord >> 48) as u32
+    }
+
+    #[inline]
+    pub fn col(&self) -> u32 {
+        ((self.coord >> 24) & 0xFF_FFFF) as u32
+    }
+
+    #[inline]
+    pub fn row(&self) -> u32 {
+        (self.coord & 0xFF_FFFF) as u32
     }
 }
 
@@ -189,7 +214,7 @@ pub type TileCache = TrackedCache<TileCoord, TileData>;
 /// L2 compressed JPEG cache — persists across slide switches.
 ///
 /// Unlike `TileCache` (L1), this cache is **not** cleared on slide switch.
-/// Tiles from different slides are disambiguated by `SlideTileCoord.slide_id`.
+/// Tiles from different slides are disambiguated by `SlideTileCoord::slide_id()`.
 pub type CompressedTileCache = TrackedCache<SlideTileCoord, CompressedTileData>;
 
 /// Compute a slide identifier by hashing its path string.
@@ -333,10 +358,10 @@ mod tests {
     #[test]
     fn test_slide_tile_coord_new() {
         let c = SlideTileCoord::new(42, 3, 10, 20);
-        assert_eq!(c.slide_id, 42);
-        assert_eq!(c.level, 3);
-        assert_eq!(c.col, 10);
-        assert_eq!(c.row, 20);
+        assert_eq!(c.slide_id(), 42);
+        assert_eq!(c.level(), 3);
+        assert_eq!(c.col(), 10);
+        assert_eq!(c.row(), 20);
     }
 
     #[test]
