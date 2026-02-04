@@ -5,10 +5,9 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 import numpy as np
-import torch
 
 from fastpath.plugins.base import ModelPlugin, ProgressCallback
 from fastpath.plugins.types import (
@@ -20,7 +19,9 @@ from fastpath.plugins.types import (
     ResolutionSpec,
 )
 
-from .model import NuLite
+if TYPE_CHECKING:
+    import torch
+    from .model import NuLite
 
 
 def _unflatten_dict(data: dict, sep: str = ".") -> dict:
@@ -52,10 +53,11 @@ class NuLitePlugin(ModelPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._model: NuLite | None = None
-        self._device: torch.device | None = None
-        self._mean: torch.Tensor | None = None
-        self._std: torch.Tensor | None = None
+        self._model: "NuLite | None" = None
+        self._torch: "torch | None" = None
+        self._device: "torch.device | None" = None
+        self._mean: "torch.Tensor | None" = None
+        self._std: "torch.Tensor | None" = None
         self._weights_path: Path | None = None
 
     @property
@@ -90,6 +92,10 @@ class NuLitePlugin(ModelPlugin):
         return self._weights_path
 
     def load_model(self) -> None:
+        torch = self._import_torch()
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for NuLite inference.")
+
         weights_path = self._resolve_weights_path()
         if not weights_path.exists():
             raise FileNotFoundError(
@@ -97,12 +103,14 @@ class NuLitePlugin(ModelPlugin):
                 f"{weights_path} or set FASTPATH_NULITE_WEIGHTS."
             )
 
-        checkpoint = torch.load(weights_path, map_location="cpu")
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
         config = _unflatten_dict(checkpoint.get("config", {}), ".")
         backbone = config.get("model", {}).get("backbone", "fastvit_t8")
         normalize = config.get("transformations", {}).get("normalize", {})
         mean = normalize.get("mean", (0.5, 0.5, 0.5))
         std = normalize.get("std", (0.5, 0.5, 0.5))
+
+        from .model import NuLite
 
         model = NuLite(
             num_nuclei_classes=6,
@@ -113,6 +121,7 @@ class NuLitePlugin(ModelPlugin):
         model.reparameterize_encoder()
         model.eval()
 
+        self._torch = torch
         self._device = torch.device("cuda")
         model.to(self._device)
 
@@ -129,11 +138,13 @@ class NuLitePlugin(ModelPlugin):
         if self._model is not None:
             del self._model
             self._model = None
+        torch = self._torch
+        self._torch = None
         self._device = None
         self._mean = None
         self._std = None
         self._model_loaded = False
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
@@ -158,6 +169,7 @@ class NuLitePlugin(ModelPlugin):
     ) -> PluginOutput:
         if self._model is None or self._device is None:
             raise RuntimeError("NuLite model is not loaded")
+        torch = self._require_torch()
 
         slide = plugin_input.slide
         region = plugin_input.region
@@ -279,8 +291,8 @@ class NuLitePlugin(ModelPlugin):
             },
         )
 
-    @classmethod
-    def _prepare_patch(cls, patch: np.ndarray) -> torch.Tensor:
+    def _prepare_patch(self, patch: np.ndarray):
+        torch = self._require_torch()
         if patch.ndim != 3 or patch.shape[2] != 3:
             raise ValueError("Expected RGB patch array")
         return torch.from_numpy(patch).permute(2, 0, 1).contiguous()
@@ -332,3 +344,15 @@ class NuLitePlugin(ModelPlugin):
                 kept.append(cell)
 
         return kept
+
+    def _import_torch(self):
+        try:
+            import torch  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("PyTorch is required for NuLite inference.") from exc
+        return torch
+
+    def _require_torch(self):
+        if self._torch is None:
+            self._torch = self._import_torch()
+        return self._torch

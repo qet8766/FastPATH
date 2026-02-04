@@ -36,3 +36,30 @@ def test_processing_finished_routes_annotations(qapp):
     assert results[0]["annotationsRouted"] is True
     assert results[0]["annotationGroup"] == "NuLite"
     assert results[0]["annotationCount"] == 1
+
+
+def test_processing_finished_geojson_not_routed(qapp):
+    controller = PluginController()
+    annotation_manager = MagicMock()
+    controller.set_annotation_manager(annotation_manager)
+
+    output = PluginOutput(
+        success=True,
+        annotations=[
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [1, 2]},
+                "properties": {"label": "Geo"},
+            }
+        ],
+    )
+
+    results = []
+    controller.processingFinished.connect(results.append)
+
+    controller._on_finished(output)
+
+    annotation_manager.addAnnotationsBatch.assert_not_called()
+    assert results
+    assert results[0]["outputType"] == "annotations"
+    assert results[0]["annotations"] == output.annotations

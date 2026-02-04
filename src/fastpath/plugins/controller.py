@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 
+import threading
+
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
 from fastpath.core.annotations import AnnotationManager
@@ -27,6 +29,7 @@ class PluginController(QObject):
     processingFinished = Signal(dict)
     processingError = Signal(str)
     processingProgress = Signal(int)
+    cudaStatusChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -37,6 +40,8 @@ class PluginController(QObject):
         self._cleaned_up = False
         self._annotation_manager: AnnotationManager | None = None
         self._current_plugin_name: str | None = None
+        self._cuda_status = "Checking"
+        self._cuda_check_in_progress = False
 
     def __del__(self) -> None:
         try:
@@ -52,6 +57,14 @@ class PluginController(QObject):
     @Property(int, notify=pluginsChanged)
     def pluginCount(self) -> int:
         return self._registry.count
+
+    @Property(bool, notify=cudaStatusChanged)
+    def cudaAvailable(self) -> bool:
+        return self._cuda_status == "Available"
+
+    @Property(str, notify=cudaStatusChanged)
+    def cudaStatus(self) -> str:
+        return self._cuda_status
 
     @property
     def last_output(self) -> PluginOutput | None:
@@ -223,6 +236,7 @@ class PluginController(QObject):
             output.success
             and output.annotations
             and self._annotation_manager is not None
+            and self._is_flat_annotation_list(output.annotations)
         ):
             group = self._current_plugin_name or "plugin"
             try:
@@ -258,6 +272,38 @@ class PluginController(QObject):
             label = ann.get("label") or "Unknown"
             breakdown[label] = breakdown.get(label, 0) + 1
         return breakdown
+
+    @staticmethod
+    def _is_flat_annotation_list(annotations: list[dict]) -> bool:
+        for ann in annotations:
+            if not isinstance(ann, dict):
+                continue
+            if "geometry" in ann:
+                return False
+            if "coordinates" in ann:
+                return True
+        return False
+
+    @Slot()
+    def refreshCudaAvailability(self) -> None:
+        if self._cuda_check_in_progress:
+            return
+        self._cuda_check_in_progress = True
+
+        def _check() -> None:
+            status = "Not available"
+            try:
+                import torch  # Heavy import; run in background
+                status = "Available" if torch.cuda.is_available() else "Not available"
+            except Exception:
+                status = "Not available"
+
+            self._cuda_check_in_progress = False
+            if status != self._cuda_status:
+                self._cuda_status = status
+                self.cudaStatusChanged.emit()
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def _on_error(self, error: str) -> None:
         self.processingError.emit(error)

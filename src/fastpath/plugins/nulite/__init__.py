@@ -1,19 +1,5 @@
-"""NuLite plugin package.
+"""NuLite plugin package."""
 
-Imports are guarded to avoid hard dependency on torch/CUDA at startup.
-"""
+from .plugin import NuLitePlugin
 
-__all__: list[str] = []
-
-try:
-    import torch
-
-    if torch.cuda.is_available():
-        try:
-            from .plugin import NuLitePlugin
-
-            __all__ = ["NuLitePlugin"]
-        except Exception:
-            __all__ = []
-except Exception:
-    __all__ = []
+__all__ = ["NuLitePlugin"]

@@ -121,9 +121,16 @@ Item {
         onContentXChanged: updateViewport()
         onContentYChanged: updateViewport()
 
-        // Smooth scrolling
-        flickDeceleration: 3000
-        maximumFlickVelocity: 8000
+        // Cancel built-in flick and replace with custom momentum (preserves throw direction)
+        onFlickStarted: {
+            // Capture velocity before canceling (content pixels per second)
+            let vx = root.velocityX * root.scale
+            let vy = root.velocityY * root.scale
+            cancelFlick()
+            let speed = Math.sqrt(vx * vx + vy * vy)
+            if (speed > 50)
+                momentumTimer.startMomentum(vx, vy)
+        }
     }
 
     // Velocity tracking timer for prefetch optimization
@@ -131,7 +138,7 @@ Item {
         id: velocityTimer
         interval: 16  // ~60fps sampling
         repeat: true
-        running: flickable.moving || flickable.flicking
+        running: flickable.moving || flickable.flicking || momentumTimer.running
         onTriggered: {
             // Calculate velocity in slide coordinates per second
             let dt = interval / 1000.0
@@ -153,6 +160,72 @@ Item {
         }
     }
 
+    // Custom momentum: decelerates speed uniformly so throw direction is preserved
+    Timer {
+        id: momentumTimer
+        interval: 16
+        repeat: true
+        property real vx: 0
+        property real vy: 0
+
+        function startMomentum(initialVX, initialVY) {
+            // Cap initial speed
+            let speed = Math.sqrt(initialVX * initialVX + initialVY * initialVY)
+            if (speed > 8000) {
+                let ratio = 8000 / speed
+                initialVX *= ratio
+                initialVY *= ratio
+            }
+            vx = initialVX
+            vy = initialVY
+            start()
+        }
+
+        onTriggered: {
+            // Stop if user started dragging again
+            if (flickable.dragging) {
+                stop()
+                return
+            }
+
+            let speed = Math.sqrt(vx * vx + vy * vy)
+            if (speed < 30) {
+                stop()
+                vx = 0
+                vy = 0
+                return
+            }
+
+            let dt = interval / 1000.0
+
+            // Apply velocity
+            let newX = flickable.contentX + vx * dt
+            let newY = flickable.contentY + vy * dt
+
+            // Clamp to bounds
+            let maxX = Math.max(0, contentContainer.width - flickable.width)
+            let maxY = Math.max(0, contentContainer.height - flickable.height)
+            newX = Math.max(0, Math.min(maxX, newX))
+            newY = Math.max(0, Math.min(maxY, newY))
+
+            // Zero out axis velocity if it hit a bound
+            if ((newX <= 0 && vx < 0) || (newX >= maxX && vx > 0)) vx = 0
+            if ((newY <= 0 && vy < 0) || (newY >= maxY && vy > 0)) vy = 0
+
+            flickable.contentX = newX
+            flickable.contentY = newY
+
+            // Uniform deceleration of speed magnitude (preserves direction)
+            speed = Math.sqrt(vx * vx + vy * vy)
+            if (speed > 0) {
+                let newSpeed = Math.max(0, speed - 3000 * dt)
+                let ratio = newSpeed / speed
+                vx *= ratio
+                vy *= ratio
+            }
+        }
+    }
+
     // Mouse area for zoom
     MouseArea {
         anchors.fill: parent
@@ -160,6 +233,7 @@ Item {
         propagateComposedEvents: true
 
         onWheel: (wheel) => {
+            momentumTimer.stop()
             let zoomFactor = wheel.angleDelta.y > 0 ? 1.4 : (1 / 1.4)
 
             // Zoom toward mouse position
@@ -197,6 +271,7 @@ Item {
         maximumScale: Theme.maxScale / root.scale
 
         onScaleChanged: {
+            momentumTimer.stop()
             let newScale = root.scale * pinchHandler.activeScale
             newScale = Math.max(root.minScale, Math.min(Theme.maxScale, newScale))
             root.scale = newScale
@@ -378,6 +453,10 @@ Item {
 
     function selectAnnotation(annotationId) {
         root.selectedAnnotationId = annotationId || ""
+    }
+
+    function clearRoi() {
+        interactionLayer.clearRoi()
     }
 
     // Handle resize

@@ -67,10 +67,16 @@ ThemedGroupBox {
         pluginCombo.model = filtered
     }
 
-    Component.onCompleted: refreshPluginList()
+    Component.onCompleted: {
+        refreshPluginList()
+        if (PluginManager && PluginManager.refreshCudaAvailability) {
+            PluginManager.refreshCudaAvailability()
+        }
+    }
 
     Connections {
         target: PluginManager
+        function onPluginsChanged() { root.refreshPluginList() }
 
         function onProcessingStarted() {
             root.isProcessing = true
@@ -104,6 +110,13 @@ ThemedGroupBox {
         spacing: Theme.spacingSmall
 
         // Plugin selector
+        Label {
+            Layout.fillWidth: true
+            text: "CUDA: " + (PluginManager.cudaStatus || "Checking")
+            color: PluginManager.cudaAvailable ? Theme.text : Theme.textMuted
+            font.pixelSize: Theme.fontSizeSmall
+        }
+
         ThemedComboBox {
             id: pluginCombo
             Layout.fillWidth: true
@@ -149,8 +162,7 @@ ThemedGroupBox {
                 buttonSize: "small"
                 Layout.fillWidth: true
                 enabled: !root.isProcessing && root.selectedRegion !== null
-                         && pluginCombo.model && pluginCombo.currentIndex >= 0
-                         && pluginCombo.currentIndex < pluginCombo.model.length
+                         && pluginCombo.count > 0 && pluginCombo.currentIndex >= 0
                 onClicked: {
                     let plugin = pluginCombo.model[pluginCombo.currentIndex]
                     if (!plugin) return

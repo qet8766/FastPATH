@@ -37,10 +37,13 @@ Item {
         root._measureEnd = null
     }
 
+    function clearRoi() {
+        root._roiVisible = false
+    }
+
     onModeChanged: {
         if (root.mode !== "draw") root._resetDraw()
         if (root.mode !== "measure") root._resetMeasure()
-        if (root.mode !== "roi") roiRect.visible = false
     }
 
     onDrawToolChanged: {
@@ -55,9 +58,15 @@ Item {
     // ROI selection mode
     // ========================
 
-    property real _roiStartX: 0
-    property real _roiStartY: 0
+    // ROI stored in slide coordinates so it survives zoom changes
+    property real _roiStartSlideX: 0
+    property real _roiStartSlideY: 0
     property bool _roiDragging: false
+    property real _roiSlideX: 0
+    property real _roiSlideY: 0
+    property real _roiSlideW: 0
+    property real _roiSlideH: 0
+    property bool _roiVisible: false
 
     MouseArea {
         id: roiMouseArea
@@ -68,42 +77,44 @@ Item {
         hoverEnabled: false
 
         onPressed: (mouse) => {
-            root._roiStartX = mouse.x
-            root._roiStartY = mouse.y
+            root._roiStartSlideX = mouse.x / root.slideScale
+            root._roiStartSlideY = mouse.y / root.slideScale
             root._roiDragging = true
-            roiRect.visible = true
+            root._roiVisible = true
         }
 
         onPositionChanged: (mouse) => {
             if (!root._roiDragging) return
-            roiRect.x = Math.min(root._roiStartX, mouse.x)
-            roiRect.y = Math.min(root._roiStartY, mouse.y)
-            roiRect.width = Math.abs(mouse.x - root._roiStartX)
-            roiRect.height = Math.abs(mouse.y - root._roiStartY)
+            let sx = mouse.x / root.slideScale
+            let sy = mouse.y / root.slideScale
+            root._roiSlideX = Math.min(root._roiStartSlideX, sx)
+            root._roiSlideY = Math.min(root._roiStartSlideY, sy)
+            root._roiSlideW = Math.abs(sx - root._roiStartSlideX)
+            root._roiSlideH = Math.abs(sy - root._roiStartSlideY)
         }
 
         onReleased: (mouse) => {
             if (!root._roiDragging) return
             root._roiDragging = false
-            roiRect.visible = false
-
-            // Compute region in slide coordinates
-            let x1 = Math.min(root._roiStartX, mouse.x) / root.slideScale
-            let y1 = Math.min(root._roiStartY, mouse.y) / root.slideScale
-            let w = Math.abs(mouse.x - root._roiStartX) / root.slideScale
-            let h = Math.abs(mouse.y - root._roiStartY) / root.slideScale
 
             // Minimum size threshold (10px in slide space)
-            if (w >= 10 && h >= 10) {
-                root.roiSelected(Qt.rect(x1, y1, w, h))
+            if (root._roiSlideW >= 10 && root._roiSlideH >= 10) {
+                root.roiSelected(Qt.rect(root._roiSlideX, root._roiSlideY,
+                                         root._roiSlideW, root._roiSlideH))
+            } else {
+                root._roiVisible = false
             }
         }
     }
 
-    // ROI visual feedback rectangle
+    // ROI visual feedback rectangle — bound to slide coords × scale
     Rectangle {
         id: roiRect
-        visible: false
+        visible: root._roiVisible
+        x: root._roiSlideX * root.slideScale
+        y: root._roiSlideY * root.slideScale
+        width: root._roiSlideW * root.slideScale
+        height: root._roiSlideH * root.slideScale
         color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
         border.color: Theme.primary
         border.width: 2
