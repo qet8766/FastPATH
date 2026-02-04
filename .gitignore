@@ -58,3 +58,8 @@ nul
 
 # UV
 .uv/
+
+# Node
+node_modules/
+web/client/dist/
+web/client/.vite/
