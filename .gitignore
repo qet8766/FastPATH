@@ -63,3 +63,7 @@ nul
 node_modules/
 web/client/dist/
 web/client/.vite/
+
+# Web runtime
+.fastpath_junctions/
+.playwright-mcp/
