@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,18 +49,32 @@ def slide_root(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def app_context(slide_root: Path):
-    app = create_app(ServerConfig(slide_dirs=[slide_root]))
+    if sys.platform != "win32":
+        pytest.skip("Junction creation is Windows-only.")
+    junction_dir = slide_root.parent / "junctions"
+    app = create_app(
+        ServerConfig(
+            slide_dirs=[slide_root],
+            junction_dir=junction_dir,
+        )
+    )
     slide_id = next(iter(app.state.slides))
-    return app, slide_id
+    return app, slide_id, junction_dir
 
 
 @pytest.fixture()
 def client(app_context) -> TestClient:
-    app, _slide_id = app_context
+    app, _slide_id, _junction_dir = app_context
     return TestClient(app)
 
 
 @pytest.fixture()
 def slide_id(app_context) -> str:
-    _app, slide_id = app_context
+    _app, slide_id, _junction_dir = app_context
     return slide_id
+
+
+@pytest.fixture()
+def junction_dir(app_context) -> Path:
+    _app, _slide_id, junction_dir = app_context
+    return junction_dir

@@ -1,77 +1,72 @@
-# Tips for FastPATH Web Viewer
+# FastPATH Web Tips (Caddy Single-Origin)
 
-This is a running checklist of the real-world gotchas we hit while wiring the web viewer.
+## Quick Start (Automated)
 
-## Server and Client Startup
-
-- The FastAPI server does **not** serve a root HTML page. `/` returns 404 by design.
-- The UI is served by Vite at `http://127.0.0.1:5173`.
-- The API lives at `http://127.0.0.1:8000`.
-- The client must know the API base:
-  ```powershell
-  $env:VITE_FASTPATH_API_BASE="http://127.0.0.1:8000"
-  cd web\client
-  npm run dev
-  ```
-- If you see `Unexpected token '<'`, the frontend is hitting the Vite server for `/api/slides` and getting HTML instead of JSON.
-
-## Slides Must Be Preprocessed
-
-The server only lists `.fastpath` directories. Raw `.svs` files are ignored.
-
-Preprocess a slide:
 ```powershell
-uv run python -m fastpath.preprocess C:\path\to\slide.svs -o C:\path\to\slides
+# Production mode (built SPA)
+.\web\start-web.ps1
+
+# Development mode (HMR via Vite)
+.\web\start-web.ps1 -Dev
+
+# With custom paths
+.\web\start-web.ps1 -SlideDir "C:\path\to\slides" -JunctionDir "C:\path\to\junctions"
+
+# Don't open browser
+.\web\start-web.ps1 -NoBrowser
+
+# Force rebuild client
+.\web\start-web.ps1 -Build
+
+# If port 443 is blocked
+.\web\start-web.ps1 -HttpsAddr "https://localhost:8443"
 ```
 
-Expected output:
-```
-slide.fastpath/
-  metadata.json
-  thumbnail.jpg
-  tiles/level_*.idx
-  tiles/level_*.pack
+Or use the batch file:
+```cmd
+web\start-web.bat       REM Production mode
+web\start-web.bat dev   REM Development mode with HMR
 ```
 
-## CORS
+Press **Ctrl+C** to stop all services.
 
-If the UI says `Failed to fetch`, the usual culprit is CORS. The server now enables:
-- `http://127.0.0.1:5173`
-- `http://localhost:5173`
+## Manual Start (Two Terminals)
 
-If you move the client to another port, add it to CORS in `web/server/main.py`.
+If you prefer manual control:
 
-## Useful Checks
+### Terminal A (API)
 
-- API slides list:
-  ```
-  http://127.0.0.1:8000/api/slides
-  ```
-- Slide metadata:
-  ```
-  http://127.0.0.1:8000/api/slides/<hash>/metadata
-  ```
-
-## Common Errors
-
-- `Slide dir does not exist`:
-  - The `FASTPATH_WEB_SLIDE_DIRS` env var is pointing to a wrong path.
-- `Unexpected token '<'`:
-  - API base not set; client is calling Vite dev server instead of FastAPI.
-- `Failed to fetch`:
-  - CORS issue or FastAPI server not running.
-
-## Dev Commands
-
-Server:
 ```powershell
 $env:FASTPATH_WEB_SLIDE_DIRS="C:\path\to\slides"
-uv run --group dev python -m web.server.main
+$env:FASTPATH_WEB_JUNCTION_DIR="C:\path\to\junctions"   # optional
+uv run --group dev uvicorn web.server.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Client:
+### Terminal B (Caddy)
+
+Production (no HMR):
 ```powershell
-$env:VITE_FASTPATH_API_BASE="http://127.0.0.1:8000"
-cd web\client
-npm run dev
+cd web/client && npm install && npm run build
+$env:FASTPATH_WEB_DIST_DIR="C:\chest\projects\fastpath_web\web\client\dist"
+$env:FASTPATH_WEB_HTTPS_ADDR="https://localhost"       # optional (use :8443 if 443 is blocked)
+caddy run --config web/Caddyfile
 ```
+
+Development (HMR):
+```powershell
+cd web/client && npm install && npm run dev            # Terminal B
+caddy run --config web/Caddyfile.dev                   # Terminal C
+```
+
+## Browsing
+
+- **Production**: `https://localhost/` (or `:8443` if port 443 is blocked)
+- **Development**: `http://127.0.0.1:8080/`
+
+If the browser blocks the HTTPS page, run `caddy trust` once to install the local CA.
+
+## Notes
+
+- Junctions are Windows-only; Caddy serves `/slides/{id}` from `FASTPATH_WEB_JUNCTION_DIR`.
+- `FASTPATH_WEB_DIST_DIR` is only needed when serving the built SPA (no HMR).
+- If you browse Vite directly on `:5173`, you are bypassing the single-origin model.

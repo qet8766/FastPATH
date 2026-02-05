@@ -1,0 +1,35 @@
+{
+    servers {
+        protocols h1 h2 h3
+    }
+}
+
+(fastpath_site) {
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle_path /slides/* {
+        @packs path *.pack *.idx
+        header @packs Cache-Control "public, max-age=31536000"
+        root * {env.FASTPATH_WEB_JUNCTION_DIR}
+        file_server
+    }
+
+    handle {
+        @assets path /assets/*
+        header @assets Cache-Control "public, max-age=31536000, immutable"
+
+        @sw path /sw.js
+        header @sw Cache-Control "no-cache"
+
+        root * {env.FASTPATH_WEB_DIST_DIR}
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+{$FASTPATH_WEB_HTTPS_ADDR:https://localhost} {
+    tls internal
+    import fastpath_site
+}

@@ -1,21 +1,24 @@
 """Fixtures for E2E tests using pytest-playwright.
 
-Starts a real Hypercorn server with the SPA dist and a test slide directory,
-then provides a live URL for Playwright to browse to.
+Starts uvicorn for the API and Caddy for SPA + slides, then provides a live URL.
 """
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
+import os
+import shutil
 import socket
 import struct
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
-from hypercorn.asyncio import serve
-from hypercorn.config import Config as HypercornConfig
+import uvicorn
 
 from web.server.config import ServerConfig
 from web.server.main import create_app
@@ -27,6 +30,57 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _wait_for_port(port: int, process: subprocess.Popen[str] | None = None) -> None:
+    for _ in range(50):
+        if process and process.poll() is not None:
+            output = ""
+            try:
+                output = process.communicate(timeout=1)[0] or ""
+            except Exception:
+                output = ""
+            pytest.fail(f"Process exited early while starting server:\n{output}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return
+        except OSError:
+            time.sleep(0.1)
+    pytest.fail("Server did not start")
+
+
+def _write_caddyfile(path: Path, port: int) -> None:
+    lines = [
+        "{",
+        "    auto_https off",
+        "}",
+        "",
+        f"http://127.0.0.1:{port} {{",
+        "    handle /api/* {",
+        "        reverse_proxy 127.0.0.1:{env.FASTPATH_WEB_API_PORT}",
+        "    }",
+        "",
+        "    handle_path /slides/* {",
+        "        @packs path *.pack *.idx",
+        "        header @packs Cache-Control \"public, max-age=31536000\"",
+        "        root * {env.FASTPATH_WEB_JUNCTION_DIR}",
+        "        file_server",
+        "    }",
+        "",
+        "    handle {",
+        "        @assets path /assets/*",
+        "        header @assets Cache-Control \"public, max-age=31536000, immutable\"",
+        "",
+        "        @sw path /sw.js",
+        "        header @sw Cache-Control \"no-cache\"",
+        "",
+        "        root * {env.FASTPATH_WEB_DIST_DIR}",
+        "        try_files {path} /index.html",
+        "        file_server",
+        "    }",
+        "}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @pytest.fixture(scope="session")
@@ -65,72 +119,107 @@ def slide_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-class _ServerRunner:
-    """Run Hypercorn in a background thread with its own event loop."""
+@pytest.fixture(scope="session")
+def slide_id(slide_root: Path) -> str:
+    fp_dir = slide_root / "sample.fastpath"
+    digest = hashlib.sha1(str(fp_dir).encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+class _UvicornRunner:
+    """Run uvicorn in a background thread."""
 
     def __init__(self, app, host: str, port: int):
-        self.app = app
-        self.host = host
-        self.port = port
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._shutdown_event: asyncio.Event | None = None
-        self._thread: threading.Thread | None = None
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._shutdown_event = asyncio.Event()
+    def stop(self) -> None:
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
 
-        hconfig = HypercornConfig()
-        hconfig.bind = [f"{self.host}:{self.port}"]
-        hconfig.loglevel = "WARNING"
 
-        self._loop.run_until_complete(
-            serve(self.app, hconfig, shutdown_trigger=self._shutdown_event.wait)
+class _CaddyRunner:
+    def __init__(self, caddyfile: Path, env: dict[str, str]):
+        self._caddyfile = caddyfile
+        self._env = env
+        self._proc: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        self._proc = subprocess.Popen(
+            ["caddy", "run", "--config", str(self._caddyfile), "--adapter", "caddyfile"],
+            env=self._env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
 
     def stop(self) -> None:
-        if self._loop and self._shutdown_event:
-            self._loop.call_soon_threadsafe(self._shutdown_event.set)
-        if self._thread:
-            self._thread.join(timeout=5)
+        if not self._proc:
+            return
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=5)
+
+    @property
+    def process(self) -> subprocess.Popen[str] | None:
+        return self._proc
 
 
 @pytest.fixture(scope="session")
-def base_url(slide_root: Path) -> str:
-    """Start a Hypercorn server in a background thread and return its URL.
+def base_url(slide_root: Path, tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Start uvicorn + Caddy and return the Caddy URL.
 
     Requires ``web/client/dist/`` to exist (run ``npm run build`` first).
     """
+    if sys.platform != "win32":
+        pytest.skip("Junction creation is Windows-only.")
+    if shutil.which("caddy") is None:
+        pytest.skip("Caddy not found in PATH.")
     if not _DIST_DIR.is_dir():
         pytest.skip(
             f"Vite dist not found at {_DIST_DIR}. "
             "Run 'cd web/client && npm run build' first."
         )
 
-    port = _free_port()
-    config = ServerConfig(slide_dirs=[slide_root], host="127.0.0.1", port=port)
+    api_port = _free_port()
+    caddy_port = _free_port()
+    junction_dir = slide_root.parent / "junctions"
+    config = ServerConfig(
+        slide_dirs=[slide_root],
+        junction_dir=junction_dir,
+    )
     app = create_app(config)
 
-    runner = _ServerRunner(app, "127.0.0.1", port)
-    runner.start()
+    api_runner = _UvicornRunner(app, "127.0.0.1", api_port)
+    api_runner.start()
+    _wait_for_port(api_port)
 
-    # Wait for server to start accepting connections
-    import time
+    caddy_dir = tmp_path_factory.mktemp("caddy")
+    caddyfile = caddy_dir / "Caddyfile"
+    _write_caddyfile(caddyfile, caddy_port)
 
-    for _ in range(50):
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        pytest.fail("Server did not start")
+    env = os.environ.copy()
+    env["FASTPATH_WEB_DIST_DIR"] = str(_DIST_DIR)
+    env["FASTPATH_WEB_JUNCTION_DIR"] = str(junction_dir)
+    env["FASTPATH_WEB_API_PORT"] = str(api_port)
 
-    yield f"http://127.0.0.1:{port}"
+    caddy_runner = _CaddyRunner(caddyfile, env)
+    try:
+        caddy_runner.start()
+        _wait_for_port(caddy_port, caddy_runner.process)
+    except Exception:
+        caddy_runner.stop()
+        api_runner.stop()
+        raise
 
-    runner.stop()
+    yield f"http://127.0.0.1:{caddy_port}"
+
+    caddy_runner.stop()
+    api_runner.stop()

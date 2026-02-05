@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -11,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+_REPARSE_POINT = 0x400
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,46 @@ def build_slide_index(slide_dirs: Iterable[Path]) -> dict[str, SlideRecord]:
         )
 
     return slides
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        return bool(path.lstat().st_file_attributes & _REPARSE_POINT)
+    except FileNotFoundError:
+        return False
+
+
+def create_junctions(slides: dict[str, SlideRecord], junction_dir: Path) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Slide junctions are only supported on Windows.")
+
+    junction_dir = junction_dir.expanduser().resolve()
+    junction_dir.mkdir(parents=True, exist_ok=True)
+
+    desired_ids = set(slides.keys())
+    for entry in junction_dir.iterdir():
+        if entry.name in desired_ids:
+            continue
+        if _is_reparse_point(entry):
+            try:
+                entry.rmdir()
+            except OSError as exc:
+                logger.warning("Failed to remove stale junction %s: %s", entry, exc)
+
+    for slide_id, record in slides.items():
+        link = junction_dir / slide_id
+        if link.exists() or link.is_symlink():
+            if _is_reparse_point(link):
+                continue
+            logger.warning("Junction path exists and is not a junction: %s", link)
+            continue
+        target = record.dir_path.resolve()
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 def create_slides_router(slides: dict[str, SlideRecord]) -> APIRouter:

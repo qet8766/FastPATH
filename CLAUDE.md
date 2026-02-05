@@ -56,11 +56,12 @@ src/fastpath_core/src/ (Rust, PyO3/maturin — DESKTOP VIEWER ONLY)
 └── error.rs           # TileError enum
 
 web/                   # WEB VIEWER — fully independent from desktop viewer
-├── server/            # FastAPI backend (slide discovery, pack/idx serving with Range requests)
-│   ├── main.py        # FastAPI app, CORS, static file serving
+├── server/            # FastAPI backend (API only; Caddy serves static + slides)
+│   ├── main.py        # FastAPI app (builds junctions, API routes only)
 │   ├── routes/slides.py  # Slide indexing and metadata endpoints
-│   ├── config.py      # ServerConfig (env vars for slide dirs, host, port)
-│   └── static_files.py   # Range request support for .pack/.idx files
+│   └── config.py      # ServerConfig (slide dirs + junction dir)
+├── Caddyfile          # Production Caddy config (SPA + slides + /api proxy)
+├── Caddyfile.dev      # Dev Caddy config (SPA via Vite, still single-origin)
 ├── client/            # React + TypeScript + Vite + WebGPU frontend
 │   └── src/
 │       ├── renderer/  # WebGPU renderer, texture atlas, WGSL shaders
@@ -137,19 +138,28 @@ uv run maturin develop --release --manifest-path src/fastpath_core/Cargo.toml  #
 uv run python -m fastpath                                                  # Run viewer
 uv run python -m fastpath.preprocess <input.svs> -o <output_dir>           # Run preprocessing
 
-# Web viewer (server + client run separately)
-# Generate SSL certs (one-time):
-openssl req -x509 -newkey rsa:4096 -keyout web/server/certs/key.pem -out web/server/certs/cert.pem -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+# Web viewer (Caddy front door; single-origin)
 $env:FASTPATH_WEB_SLIDE_DIRS="C:\path\to\slides"                          # Point to .fastpath dirs
-uv run --group dev python -m web.server.main                               # Hypercorn HTTPS server at :8000 (HTTP/3)
-$env:VITE_FASTPATH_API_BASE="https://127.0.0.1:8000"                      # Client needs API base (HTTPS)
+$env:FASTPATH_WEB_JUNCTION_DIR="C:\path\to\junctions"                     # Optional (default .fastpath_junctions)
+$env:FASTPATH_WEB_HTTPS_ADDR="https://localhost"                          # Optional (use :8443 if 443 is blocked)
+uv run --group dev uvicorn web.server.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Option A: no HMR (Caddy serves built SPA)
+cd web/client && npm install && npm run build
+$env:FASTPATH_WEB_DIST_DIR="C:\chest\projects\fastpath_web\web\client\dist"
+caddy run --config web/Caddyfile
+# If the browser blocks https://localhost, run: caddy trust
+
+# Option B: HMR (Caddy stays front door, SPA via Vite)
 cd web/client && npm install && npm run dev                                # Vite dev server at :5173
+caddy run --config web/Caddyfile.dev                                      # Browse http://127.0.0.1:8080
 
 # Testing
 uv run python -m pytest tests/                                             # Python tests (desktop)
 uv run python -m pytest web/tests/                                         # Python tests (web server)
 uv run python -m pytest tests/test_annotations.py -k "test_name"           # Single test
 cd web/client && npm test                                                  # Web client tests (vitest)
+cd web/client && npm run build && cd ../.. && uv run python -m pytest web/tests/e2e/  # E2E tests (requires built client)
 cd src/fastpath_core && cargo test                                         # Rust tests
 cd src/fastpath_core && cargo clippy -- -D warnings                        # Rust lint (must pass clean)
 ```
@@ -184,11 +194,9 @@ Web viewer — in `web/server/config.py`:
 | Variable | Default | Description |
 |---|---|---|
 | `FASTPATH_WEB_SLIDE_DIRS` | cwd | Semicolon-separated paths to directories containing `.fastpath` dirs |
-| `FASTPATH_WEB_HOST` | `127.0.0.1` | Web server bind host |
-| `FASTPATH_WEB_PORT` | `8000` | Web server bind port |
-| `FASTPATH_WEB_SSL_CERTFILE` | `web/server/certs/cert.pem` | Path to SSL certificate |
-| `FASTPATH_WEB_SSL_KEYFILE` | `web/server/certs/key.pem` | Path to SSL private key |
-| `VITE_FASTPATH_API_BASE` | — | Client-side: API base URL (must be set for dev, e.g. `https://127.0.0.1:8000`) |
+| `FASTPATH_WEB_JUNCTION_DIR` | `.fastpath_junctions` | Directory where `{slide_id}` junctions are created |
+| `FASTPATH_WEB_DIST_DIR` | `web/client/dist` | Caddy SPA build output directory |
+| `VITE_FASTPATH_API_BASE` | — | Client-side API base (only if bypassing Caddy in dev) |
 
 ## Windows Notes
 
@@ -234,8 +242,18 @@ Sidebar panels are extracted into individual components (`SlideInfoPanel`, `Over
 
 The web viewer is a separate stack that reads the same `.fastpath` directories produced by preprocessing. It does not import any Python from the desktop viewer.
 
-- **Server**: FastAPI + Hypercorn serves slide metadata (`/api/slides`, `/api/slides/<hash>/metadata`) and tile data via HTTP Range requests on `.pack`/`.idx` files. **HTTP/3 (QUIC)** is enabled when SSL certs are present, eliminating HTTP/1.1's 6-connection limit for tile loading.
+- **Server**: FastAPI serves API only (`/api/slides`, `/api/slides/<hash>/metadata`) and creates Windows junctions for slide data.
+- **Caddy**: Front door for browsers; serves the SPA, `/slides/{id}` from junctions, and reverse-proxies `/api/*` to uvicorn. Handles Range requests and can enable HTTP/3.
 - **Client**: React + Vite app with a custom **WebGPU** renderer. Tile scheduling, decode workers, and caching are implemented in TypeScript, mirroring the Rust scheduler's logic. WGSL shaders handle tile compositing.
-- **HTTPS/HTTP3**: Server uses self-signed certs for local development. Generate certs in `web/server/certs/` (see Development Commands). Falls back to HTTP-only if certs are missing.
-- **CORS**: Server allows both `http://` and `https://` origins for `localhost:5173` and `127.0.0.1:5173`. Add new origins in `web/server/main.py` if needed.
 - **Pack v2 index format**: Magic `FPLIDX1\0`, version 1, 16-byte header, 12-byte entries (`u64 offset` + `u32 length`), `u16` cols/rows, row-major ordering. `length == 0` means missing tile.
+
+### Web Client Tile Scheduler
+
+The TypeScript `TileScheduler` (`web/client/src/scheduler/TileScheduler.ts`) mirrors the Rust scheduler's logic:
+
+- **Generation counter**: Monotonic counter bumped on `open()`/`close()`. Stale requests (from previous slide) are discarded at multiple checkpoints.
+- **Abortable fetches**: Network requests store abort handles. When viewport changes, `cancelStaleRequests()` aborts in-flight requests for tiles no longer needed, freeing bandwidth for current viewport.
+- **Fallback tiles**: During zoom transitions, previous-level tiles render underneath new-level tiles to prevent gray flicker. `fallbackInstances` cleared once new level fully loads.
+- **Pending queue**: `pending[]` + `pendingKeys` Set for O(1) dedup. Items store pre-computed tile keys to avoid repeated string allocations.
+
+With the Caddy-mandatory model, browse through Caddy even during HMR (`web/Caddyfile.dev`).

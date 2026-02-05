@@ -1,14 +1,17 @@
-"""E2E tests for single-port SPA serving from FastAPI.
-
-Verifies that the Vite-built client is served correctly alongside the API,
-all from a single FastAPI server on one port.
-"""
+"""E2E tests for Caddy fronting SPA + API."""
 
 from __future__ import annotations
 
 import re
 
 from playwright.sync_api import Page, expect
+
+
+def _extract_asset_path(html: str) -> str:
+    match = re.search(r'/(assets/[^"\']+\.(?:js|css))', html)
+    if not match:
+        raise AssertionError("No asset path found in index.html")
+    return match.group(0)
 
 
 def test_spa_root_loads(page: Page, base_url: str) -> None:
@@ -44,9 +47,10 @@ def test_zoom_controls_visible(page: Page, base_url: str) -> None:
 
 def test_vite_assets_served(page: Page, base_url: str) -> None:
     """Hashed JS/CSS bundles under /assets/ are served with correct headers."""
-    response = page.request.get(f"{base_url}/assets/")
-    # StaticFiles returns a directory listing or the file itself;
-    # the important thing is the asset files load when the page loads.
+    index_response = page.request.get(base_url)
+    asset_path = _extract_asset_path(index_response.text())
+    asset_response = page.request.get(f"{base_url}{asset_path}")
+    assert asset_response.status == 200
     page.goto(base_url)
 
     # Check that main JS bundle loaded (it would fail to render otherwise)
@@ -55,10 +59,9 @@ def test_vite_assets_served(page: Page, base_url: str) -> None:
 
 def test_asset_cache_headers(page: Page, base_url: str) -> None:
     """Vite hashed assets get immutable cache-control headers."""
-    page.goto(base_url)
-
-    # Find an asset request from the page load
-    response = page.request.get(f"{base_url}/assets/index-BUA0FQhX.css")
+    index_response = page.request.get(base_url)
+    asset_path = _extract_asset_path(index_response.text())
+    response = page.request.get(f"{base_url}{asset_path}")
     cache_control = response.headers.get("cache-control", "")
     assert "immutable" in cache_control
     assert "max-age=31536000" in cache_control
@@ -84,6 +87,16 @@ def test_slide_file_404_not_swallowed(page: Page, base_url: str) -> None:
     """Requests to /slides/... with bad IDs return 404, not index.html."""
     response = page.request.get(f"{base_url}/slides/bad_id/tiles/level_0.pack")
     assert response.status == 404
+
+
+def test_slide_pack_range(page: Page, base_url: str, slide_id: str) -> None:
+    response = page.request.get(
+        f"{base_url}/slides/{slide_id}/tiles/level_0.pack",
+        headers={"Range": "bytes=0-3"},
+    )
+    assert response.status == 206
+    assert response.body() == b"tile"
+    assert response.headers.get("content-range") == "bytes 0-3/10"
 
 
 def test_spa_fallback_for_client_routes(page: Page, base_url: str) -> None:
