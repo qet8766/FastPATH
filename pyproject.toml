@@ -84,7 +84,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-qt>=4.5.0",
     "fastapi>=0.110",
-    "uvicorn>=0.29",
+    "hypercorn[h3]>=0.17.0",
     "httpx>=0.26",
     "pytest-playwright>=0.7.2",
 ]

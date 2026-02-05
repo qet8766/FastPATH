@@ -22,7 +22,7 @@ export class TileFetchQueue {
   private pending: PendingItem[] = [];
   private active = new Set<PendingItem>();
 
-  constructor(maxConcurrent = 8) {
+  constructor(maxConcurrent = 6) {
     this.fetcher = new TileFetcher();
     this.maxConcurrent = maxConcurrent;
   }

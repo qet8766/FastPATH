@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -62,7 +63,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "https://localhost:5173",
+            "https://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "*",
+        ],
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
@@ -128,16 +135,43 @@ app = create_app()
 
 
 def main() -> None:
-    import uvicorn
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config as HypercornConfig
 
     config = load_config()
-    uvicorn.run(
-        "web.server.main:app",
-        host=config.host,
-        port=config.port,
-        reload=True,
-    )
+
+    hconfig = HypercornConfig()
+    hconfig.bind = [f"{config.host}:{config.port}"]
+
+    # Enable HTTPS/HTTP3 if certificates exist
+    # Resolve to absolute paths for reliable access
+    certfile = config.ssl_certfile.resolve() if config.ssl_certfile.exists() else None
+    keyfile = config.ssl_keyfile.resolve() if config.ssl_keyfile.exists() else None
+
+    if certfile and keyfile and certfile.exists() and keyfile.exists():
+        hconfig.certfile = str(certfile)
+        hconfig.keyfile = str(keyfile)
+        # HTTP/3 (QUIC) on same port
+        hconfig.quic_bind = [f"{config.host}:{config.port}"]
+        logger.info(
+            "Starting HTTPS server with HTTP/3 on %s:%d",
+            config.host,
+            config.port,
+        )
+    else:
+        logger.warning(
+            "SSL certificates not found at %s and %s. "
+            "Running HTTP-only (no HTTP/3). Generate certs with: "
+            "openssl req -x509 -newkey rsa:4096 -keyout web/server/certs/key.pem "
+            "-out web/server/certs/cert.pem -days 365 -nodes -subj '/CN=localhost' "
+            "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'",
+            config.ssl_certfile,
+            config.ssl_keyfile,
+        )
+
+    asyncio.run(serve(app, hconfig))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()

@@ -8,8 +8,10 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ServerConfig:
     slide_dirs: list[Path]
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"  # 0.0.0.0 has SSL issues with Hypercorn on Windows
     port: int = 8000
+    ssl_certfile: Path = Path("web/server/certs/cert.pem")
+    ssl_keyfile: Path = Path("web/server/certs/key.pem")
 
 
 def _split_paths(value: str) -> list[Path]:
@@ -23,10 +25,22 @@ def load_config() -> ServerConfig:
     slide_dirs = _split_paths(os.getenv("FASTPATH_WEB_SLIDE_DIRS", ""))
     if not slide_dirs:
         slide_dirs = [Path.cwd().resolve()]
-    host = os.getenv("FASTPATH_WEB_HOST", "0.0.0.0")
+    host = os.getenv("FASTPATH_WEB_HOST", "127.0.0.1")
     port_str = os.getenv("FASTPATH_WEB_PORT", "8000")
     try:
         port = int(port_str)
     except ValueError:
         port = 8000
-    return ServerConfig(slide_dirs=slide_dirs, host=host, port=port)
+
+    ssl_certfile_str = os.getenv("FASTPATH_WEB_SSL_CERTFILE", "web/server/certs/cert.pem")
+    ssl_keyfile_str = os.getenv("FASTPATH_WEB_SSL_KEYFILE", "web/server/certs/key.pem")
+    ssl_certfile = Path(ssl_certfile_str).expanduser()
+    ssl_keyfile = Path(ssl_keyfile_str).expanduser()
+
+    return ServerConfig(
+        slide_dirs=slide_dirs,
+        host=host,
+        port=port,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+    )

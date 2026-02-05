@@ -1,11 +1,12 @@
 """Fixtures for E2E tests using pytest-playwright.
 
-Starts a real uvicorn server with the SPA dist and a test slide directory,
+Starts a real Hypercorn server with the SPA dist and a test slide directory,
 then provides a live URL for Playwright to browse to.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import struct
@@ -13,7 +14,8 @@ import threading
 from pathlib import Path
 
 import pytest
-import uvicorn
+from hypercorn.asyncio import serve
+from hypercorn.config import Config as HypercornConfig
 
 from web.server.config import ServerConfig
 from web.server.main import create_app
@@ -63,9 +65,44 @@ def slide_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
+class _ServerRunner:
+    """Run Hypercorn in a background thread with its own event loop."""
+
+    def __init__(self, app, host: str, port: int):
+        self.app = app
+        self.host = host
+        self.port = port
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._shutdown_event: asyncio.Event | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._shutdown_event = asyncio.Event()
+
+        hconfig = HypercornConfig()
+        hconfig.bind = [f"{self.host}:{self.port}"]
+        hconfig.loglevel = "WARNING"
+
+        self._loop.run_until_complete(
+            serve(self.app, hconfig, shutdown_trigger=self._shutdown_event.wait)
+        )
+
+    def stop(self) -> None:
+        if self._loop and self._shutdown_event:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
+        if self._thread:
+            self._thread.join(timeout=5)
+
+
 @pytest.fixture(scope="session")
 def base_url(slide_root: Path) -> str:
-    """Start a uvicorn server in a background thread and return its URL.
+    """Start a Hypercorn server in a background thread and return its URL.
 
     Requires ``web/client/dist/`` to exist (run ``npm run build`` first).
     """
@@ -79,11 +116,8 @@ def base_url(slide_root: Path) -> str:
     config = ServerConfig(slide_dirs=[slide_root], host="127.0.0.1", port=port)
     app = create_app(config)
 
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    runner = _ServerRunner(app, "127.0.0.1", port)
+    runner.start()
 
     # Wait for server to start accepting connections
     import time
@@ -99,5 +133,4 @@ def base_url(slide_root: Path) -> str:
 
     yield f"http://127.0.0.1:{port}"
 
-    server.should_exit = True
-    thread.join(timeout=5)
+    runner.stop()

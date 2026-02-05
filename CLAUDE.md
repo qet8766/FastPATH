@@ -138,9 +138,11 @@ uv run python -m fastpath                                                  # Run
 uv run python -m fastpath.preprocess <input.svs> -o <output_dir>           # Run preprocessing
 
 # Web viewer (server + client run separately)
+# Generate SSL certs (one-time):
+openssl req -x509 -newkey rsa:4096 -keyout web/server/certs/key.pem -out web/server/certs/cert.pem -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 $env:FASTPATH_WEB_SLIDE_DIRS="C:\path\to\slides"                          # Point to .fastpath dirs
-uv run --group dev python -m web.server.main                               # FastAPI server at :8000
-$env:VITE_FASTPATH_API_BASE="http://127.0.0.1:8000"                       # Client needs API base
+uv run --group dev python -m web.server.main                               # Hypercorn HTTPS server at :8000 (HTTP/3)
+$env:VITE_FASTPATH_API_BASE="https://127.0.0.1:8000"                      # Client needs API base (HTTPS)
 cd web/client && npm install && npm run dev                                # Vite dev server at :5173
 
 # Testing
@@ -184,7 +186,9 @@ Web viewer — in `web/server/config.py`:
 | `FASTPATH_WEB_SLIDE_DIRS` | cwd | Semicolon-separated paths to directories containing `.fastpath` dirs |
 | `FASTPATH_WEB_HOST` | `127.0.0.1` | Web server bind host |
 | `FASTPATH_WEB_PORT` | `8000` | Web server bind port |
-| `VITE_FASTPATH_API_BASE` | — | Client-side: API base URL (must be set for dev, e.g. `http://127.0.0.1:8000`) |
+| `FASTPATH_WEB_SSL_CERTFILE` | `web/server/certs/cert.pem` | Path to SSL certificate |
+| `FASTPATH_WEB_SSL_KEYFILE` | `web/server/certs/key.pem` | Path to SSL private key |
+| `VITE_FASTPATH_API_BASE` | — | Client-side: API base URL (must be set for dev, e.g. `https://127.0.0.1:8000`) |
 
 ## Windows Notes
 
@@ -230,7 +234,8 @@ Sidebar panels are extracted into individual components (`SlideInfoPanel`, `Over
 
 The web viewer is a separate stack that reads the same `.fastpath` directories produced by preprocessing. It does not import any Python from the desktop viewer.
 
-- **Server**: FastAPI serves slide metadata (`/api/slides`, `/api/slides/<hash>/metadata`) and tile data via HTTP Range requests on `.pack`/`.idx` files. No root HTML page — `/` returns 404 by design.
+- **Server**: FastAPI + Hypercorn serves slide metadata (`/api/slides`, `/api/slides/<hash>/metadata`) and tile data via HTTP Range requests on `.pack`/`.idx` files. **HTTP/3 (QUIC)** is enabled when SSL certs are present, eliminating HTTP/1.1's 6-connection limit for tile loading.
 - **Client**: React + Vite app with a custom **WebGPU** renderer. Tile scheduling, decode workers, and caching are implemented in TypeScript, mirroring the Rust scheduler's logic. WGSL shaders handle tile compositing.
-- **CORS**: Server allows `http://127.0.0.1:5173` and `http://localhost:5173`. Add new origins in `web/server/main.py` if needed.
+- **HTTPS/HTTP3**: Server uses self-signed certs for local development. Generate certs in `web/server/certs/` (see Development Commands). Falls back to HTTP-only if certs are missing.
+- **CORS**: Server allows both `http://` and `https://` origins for `localhost:5173` and `127.0.0.1:5173`. Add new origins in `web/server/main.py` if needed.
 - **Pack v2 index format**: Magic `FPLIDX1\0`, version 1, 16-byte header, 12-byte entries (`u64 offset` + `u32 length`), `u16` cols/rows, row-major ordering. `length == 0` means missing tile.

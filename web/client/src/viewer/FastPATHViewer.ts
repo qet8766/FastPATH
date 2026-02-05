@@ -63,7 +63,7 @@ export class FastPATHViewer {
     const metadata = await fetchMetadata(slideId);
     const store = new SlideIndexStore(slideBaseUrl(slideId), metadata);
     this.fetchQueue = new TileFetchQueue();
-    const fetcher = new LevelPackFetcher(2_000_000, this.fetchQueue);
+    const fetcher = new LevelPackFetcher(8_000_000, this.fetchQueue);
     this.network = new TileNetwork(store, fetcher);
     await this.network.load();
     this.scheduler.attachNetwork(this.network, this.fetchQueue);
@@ -74,6 +74,7 @@ export class FastPATHViewer {
     this.metadata = metadata;
     this.state.setMetadata(metadata);
     this.scheduler.open(metadata);
+    await this.scheduler.bootstrapLevel(0);
     this.fitToSlide();
     return metadata;
   }
