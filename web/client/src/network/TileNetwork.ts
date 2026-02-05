@@ -1,5 +1,6 @@
 import type { TileCoord } from "../types";
 import type { TileRef } from "./LevelIndexParser";
+import type { AbortableFetch } from "./LevelPackFetcher";
 import { LevelPackFetcher } from "./LevelPackFetcher";
 import { SlideIndexStore } from "./SlideIndexStore";
 
@@ -24,6 +25,18 @@ export class TileNetwork {
   }
 
   async fetchTile(coord: TileCoord): Promise<ArrayBuffer | null> {
+    const result = this.fetchTileAbortable(coord);
+    if (!result) {
+      return null;
+    }
+    return result.promise;
+  }
+
+  /**
+   * Fetch a tile with the ability to abort the request.
+   * Returns null if the tile doesn't exist in the index.
+   */
+  fetchTileAbortable(coord: TileCoord): AbortableFetch | null {
     const index = this.store.getIndex(coord.level);
     if (!index) {
       return null;
@@ -34,9 +47,12 @@ export class TileNetwork {
     }
     const packSize = this.store.getPackSize(coord.level);
     if (packSize === undefined) {
-      throw new Error("Missing pack size for level");
+      return {
+        promise: Promise.reject(new Error("Missing pack size for level")),
+        abort: () => {},
+      };
     }
     validateTileRef(ref, packSize);
-    return this.fetcher.fetchTile(this.store.packUrl(coord.level), ref, packSize);
+    return this.fetcher.fetchTileAbortable(this.store.packUrl(coord.level), ref, packSize);
   }
 }

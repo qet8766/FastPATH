@@ -2,6 +2,11 @@ import { TileFetcher } from "./TileFetcher";
 import { TileFetchQueue } from "./TileFetchQueue";
 import type { TileRef } from "./LevelIndexParser";
 
+export interface AbortableFetch {
+  promise: Promise<ArrayBuffer>;
+  abort: () => void;
+}
+
 export class LevelPackFetcher {
   private fetcher: TileFetcher;
   private queue?: TileFetchQueue;
@@ -15,21 +20,44 @@ export class LevelPackFetcher {
   }
 
   async fetchTile(packUrl: string, ref: TileRef, packSize?: number): Promise<ArrayBuffer> {
+    return this.fetchTileAbortable(packUrl, ref, packSize).promise;
+  }
+
+  fetchTileAbortable(packUrl: string, ref: TileRef, packSize?: number): AbortableFetch {
+    // For small packs, fetch the entire pack and slice (not abortable once started)
     if (packSize && packSize <= this.thresholdBytes) {
       const cached = this.fullPackCache.get(packUrl);
-      const buffer = cached ?? (await this.fetchFullPack(packUrl));
-      const offset = Number(ref.offset);
-      if (!Number.isSafeInteger(offset)) {
-        throw new Error("Tile offset exceeds safe integer range");
+      if (cached) {
+        const offset = Number(ref.offset);
+        if (!Number.isSafeInteger(offset)) {
+          return {
+            promise: Promise.reject(new Error("Tile offset exceeds safe integer range")),
+            abort: () => {},
+          };
+        }
+        return {
+          promise: Promise.resolve(cached.slice(offset, offset + ref.length)),
+          abort: () => {},
+        };
       }
-      return buffer.slice(offset, offset + ref.length);
+      // Full pack fetch - not individually abortable, but rare for large slides
+      const promise = this.fetchFullPack(packUrl).then((buffer) => {
+        const offset = Number(ref.offset);
+        if (!Number.isSafeInteger(offset)) {
+          throw new Error("Tile offset exceeds safe integer range");
+        }
+        return buffer.slice(offset, offset + ref.length);
+      });
+      return { promise, abort: () => {} };
     }
 
+    // Range request through queue (abortable)
     if (this.queue) {
-      return this.queue.enqueueRange(packUrl, ref.offset, ref.length).promise;
+      return this.queue.enqueueRange(packUrl, ref.offset, ref.length);
     }
 
-    return this.fetcher.fetchRange(packUrl, ref.offset, ref.length).promise;
+    // Direct range fetch (abortable)
+    return this.fetcher.fetchRange(packUrl, ref.offset, ref.length);
   }
 
   async fetchFullPack(packUrl: string): Promise<ArrayBuffer> {

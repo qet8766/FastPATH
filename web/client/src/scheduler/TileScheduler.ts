@@ -2,7 +2,6 @@ import type { LevelInfo, SlideMetadata, TileCoord, Viewport } from "../types";
 import { getLevel } from "../types";
 import { PrefetchCalculator } from "./PrefetchCalculator";
 import { visibleTiles } from "./ViewportCalculator";
-import { cacheMissRatio } from "./CacheMissThreshold";
 import { TileTextureAtlas } from "../renderer/TileTextureAtlas";
 import type { TileInstance } from "../renderer/WebGPURenderer";
 import { WebGPURenderer } from "../renderer/WebGPURenderer";
@@ -14,13 +13,13 @@ import { DecodeWorkerPool, decodeImageFallback } from "../workers/DecodePool";
 export interface TileSchedulerOptions {
   prefetchBudget?: number;
   maxInFlight?: number;
-  cacheMissThreshold?: number;
   decodedCacheSize?: number;
   decodeWorkers?: number;
 }
 
 interface PendingRequest {
   coord: TileCoord;
+  key: string;
   generation: number;
 }
 
@@ -30,7 +29,6 @@ export class TileScheduler {
   private prefetch: PrefetchCalculator;
   private prefetchBudget: number;
   private maxInFlight: number;
-  private cacheMissThreshold: number;
   private decodedCache: TileCache<ImageBitmap>;
   private renderer: WebGPURenderer | null = null;
   private atlas: TileTextureAtlas | null = null;
@@ -41,6 +39,7 @@ export class TileScheduler {
   private pending: PendingRequest[] = [];
   private pendingKeys = new Set<string>();
   private inFlight = new Map<string, number>();
+  private abortHandles = new Map<string, () => void>();
   private renderPending = false;
   private needsInitialRender = true;
   private previousLevel: number | null = null;
@@ -51,8 +50,7 @@ export class TileScheduler {
   constructor(options: TileSchedulerOptions = {}) {
     this.prefetch = new PrefetchCalculator();
     this.prefetchBudget = options.prefetchBudget ?? 32;
-    this.maxInFlight = options.maxInFlight ?? 24;
-    this.cacheMissThreshold = options.cacheMissThreshold ?? 0.3;
+    this.maxInFlight = options.maxInFlight ?? 48;
     this.decodedCache = new TileCache<ImageBitmap>(options.decodedCacheSize ?? 256);
 
     if (typeof Worker !== "undefined") {
@@ -88,12 +86,75 @@ export class TileScheduler {
     this.pending = [];
     this.pendingKeys.clear();
     this.inFlight.clear();
+    this.abortHandles.clear();
     this.fetchQueue?.cancelAll();
     this.decodedCache.clear();
     this.atlas?.reset();
 
     if (this.renderer && this.atlas) {
       this.renderer.configureAtlas(metadata.tile_size, this.atlas.capacity);
+    }
+  }
+
+  async bootstrapLevel(level: number): Promise<void> {
+    if (!this.metadata || !this.network || !this.renderer || !this.atlas) {
+      return;
+    }
+    const levelInfo = getLevel(this.metadata, level);
+    if (!levelInfo) {
+      return;
+    }
+    const gen = this.generation;
+    const coords: TileCoord[] = [];
+    for (let row = 0; row < levelInfo.rows; row++) {
+      for (let col = 0; col < levelInfo.cols; col++) {
+        coords.push({ level, col, row });
+      }
+    }
+
+    const results = await Promise.all(
+      coords.map(async (coord) => {
+        try {
+          const buffer = await this.network!.fetchTile(coord);
+          if (!buffer || gen !== this.generation) return null;
+          const decoded = this.decodePool
+            ? await this.decodePool.decode(buffer)
+            : await decodeImageFallback(buffer);
+          if (gen !== this.generation) {
+            decoded.bitmap.close();
+            return null;
+          }
+          return { coord, bitmap: decoded.bitmap };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    if (gen !== this.generation || !this.renderer || !this.atlas) {
+      for (const r of results) {
+        if (r) r.bitmap.close();
+      }
+      return;
+    }
+
+    const instances: TileInstance[] = [];
+    for (const r of results) {
+      if (!r) continue;
+      const key = tileKey(r.coord);
+      const allocation = this.atlas.allocate(key);
+      await this.renderer.uploadTile(allocation.layer, r.bitmap);
+      this.decodedCache.set(key, r.bitmap);
+      const instance = this.buildInstance(r.coord, allocation.layer);
+      if (instance) {
+        instances.push(instance);
+      }
+    }
+
+    if (gen === this.generation) {
+      this.fallbackInstances = instances;
+      this.fallbackActive = instances.length > 0;
+      this.scheduleRender();
     }
   }
 
@@ -104,6 +165,7 @@ export class TileScheduler {
     this.pending = [];
     this.pendingKeys.clear();
     this.inFlight.clear();
+    this.abortHandles.clear();
     this.fetchQueue?.cancelAll();
     this.decodedCache.clear();
     this.atlas?.reset();
@@ -116,6 +178,30 @@ export class TileScheduler {
   updateViewport(viewport: Viewport): void {
     this.viewport = viewport;
     this.scheduleRender();
+  }
+
+  /**
+   * Cancel pending and in-flight requests for tiles not in the wanted set.
+   * This prevents stale requests from consuming bandwidth when viewport changes.
+   */
+  private cancelStaleRequests(wantedKeys: Set<string>): void {
+    // Cancel in-flight requests not in current viewport
+    for (const [key, abort] of this.abortHandles) {
+      if (!wantedKeys.has(key)) {
+        abort();
+        this.abortHandles.delete(key);
+        this.inFlight.delete(key);
+      }
+    }
+
+    // Filter pending queue to only include wanted tiles
+    this.pending = this.pending.filter((item) => {
+      if (!wantedKeys.has(item.key)) {
+        this.pendingKeys.delete(item.key);
+        return false;
+      }
+      return true;
+    });
   }
 
   prefetchTiles(viewport: Viewport, cached: (coord: TileCoord) => boolean): TileCoord[] {
@@ -154,7 +240,27 @@ export class TileScheduler {
     this.previousLevel = level;
 
     const visible = visibleTiles(this.metadata, this.viewport);
-    const { cached, missing } = this.resolveVisibleTiles(visible);
+
+    // Compute keys once and reuse - avoid repeated tileKey() calls
+    const visibleKeys: string[] = [];
+    for (const coord of visible) {
+      visibleKeys.push(tileKey(coord));
+    }
+
+    // Build set of tiles we want (visible + prefetch) and cancel stale requests
+    const cachedCheck = (coord: TileCoord) => {
+      return (this.atlas?.touch(tileKey(coord)) ?? null) !== null;
+    };
+    const prefetch = this.prefetchTiles(this.viewport, cachedCheck);
+
+    const wantedKeys = new Set<string>(visibleKeys);
+    for (const coord of prefetch) {
+      wantedKeys.add(tileKey(coord));
+    }
+    this.cancelStaleRequests(wantedKeys);
+
+    // Resolve visible tiles using pre-computed keys
+    const { cached, missing } = this.resolveVisibleTilesWithKeys(visible, visibleKeys);
 
     if (this.needsInitialRender && visible.length > 0) {
       this.needsInitialRender = false;
@@ -185,18 +291,23 @@ export class TileScheduler {
     this.renderer.setTiles(renderInstances);
     this.renderer.render();
 
-    this.requestTiles(missing, this.viewport);
+    // Pass prefetch tiles directly - avoid recomputing
+    this.requestTiles(missing, prefetch);
   }
 
-  private resolveVisibleTiles(visible: TileCoord[]): {
+  private resolveVisibleTilesWithKeys(
+    visible: TileCoord[],
+    keys: string[]
+  ): {
     cached: TileInstance[];
     missing: TileCoord[];
   } {
     const cached: TileInstance[] = [];
     const missing: TileCoord[] = [];
 
-    for (const coord of visible) {
-      const key = tileKey(coord);
+    for (let i = 0; i < visible.length; i++) {
+      const coord = visible[i];
+      const key = keys[i];
       const layer = this.atlas?.touch(key);
       if (layer !== null && layer !== undefined) {
         const instance = this.buildInstance(coord, layer);
@@ -211,21 +322,20 @@ export class TileScheduler {
     return { cached, missing };
   }
 
-  private requestTiles(visibleMissing: TileCoord[], viewport: Viewport): void {
-    if (!this.metadata || !this.network) {
+  private requestTiles(visibleMissing: TileCoord[], prefetch: TileCoord[]): void {
+    if (!this.network) {
       return;
     }
 
-    const cachedCheck = (coord: TileCoord) => {
-      const key = tileKey(coord);
-      return (this.atlas?.touch(key) ?? null) !== null;
-    };
-
-    const prefetch = this.prefetchTiles(viewport, cachedCheck);
-    const queue = visibleMissing.concat(prefetch).slice(0, this.prefetchBudget + visibleMissing.length);
-
-    for (const coord of queue) {
+    // Enqueue visible missing tiles first (priority)
+    for (const coord of visibleMissing) {
       this.enqueueTile(coord);
+    }
+
+    // Then enqueue prefetch tiles up to budget
+    const prefetchLimit = this.prefetchBudget;
+    for (let i = 0; i < prefetch.length && i < prefetchLimit; i++) {
+      this.enqueueTile(prefetch[i]);
     }
 
     this.pump();
@@ -245,13 +355,10 @@ export class TileScheduler {
     if (cachedBitmap && this.atlas && this.renderer) {
       const allocation = this.atlas.allocate(key);
       this.uploadBitmap(key, cachedBitmap, allocation.layer, this.generation);
-      if (allocation.evictedKey) {
-        // Evicted tiles are dropped from the atlas; cache keeps decoded bitmap.
-      }
       return;
     }
 
-    this.pending.push({ coord, generation: this.generation });
+    this.pending.push({ coord, key, generation: this.generation });
     this.pendingKeys.add(key);
   }
 
@@ -265,13 +372,13 @@ export class TileScheduler {
       if (!item) {
         return;
       }
-      const key = tileKey(item.coord);
+      const { coord, key, generation } = item;
       this.pendingKeys.delete(key);
-      if (item.generation !== this.generation) {
+      if (generation !== this.generation) {
         continue;
       }
-      this.inFlight.set(key, item.generation);
-      this.fetchAndUpload(item.coord, item.generation)
+      this.inFlight.set(key, generation);
+      this.fetchAndUpload(coord, key, generation)
         .catch(() => {
           // Ignore; errors already logged in fetch
         })
@@ -282,20 +389,31 @@ export class TileScheduler {
     }
   }
 
-  private async fetchAndUpload(coord: TileCoord, generation: number): Promise<void> {
+  private async fetchAndUpload(coord: TileCoord, key: string, generation: number): Promise<void> {
     if (!this.network || !this.metadata) {
       return;
     }
 
-    const key = tileKey(coord);
     if (generation !== this.generation) {
       return;
     }
 
     let buffer: ArrayBuffer | null = null;
     try {
-      buffer = await this.network.fetchTile(coord);
+      const abortable = this.network.fetchTileAbortable(coord);
+      if (!abortable) {
+        return;
+      }
+      // Store abort handle so we can cancel if tile goes out of viewport
+      this.abortHandles.set(key, abortable.abort);
+      try {
+        buffer = await abortable.promise;
+      } finally {
+        // Clean up abort handle after fetch completes (success or failure)
+        this.abortHandles.delete(key);
+      }
     } catch (error) {
+      // Request was cancelled or failed
       return;
     }
 
