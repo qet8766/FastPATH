@@ -37,6 +37,9 @@ export class WebGPURenderer {
   private format: GPUTextureFormat | null = null;
   private tileSize = 0;
   private maxLayers = 0;
+  private tileGeneration = 0;
+  private lastSetGeneration = -1;
+  private lastSetCount = -1;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -114,6 +117,16 @@ export class WebGPURenderer {
     if (!this.device) {
       return;
     }
+
+    if (
+      tiles.length === this.lastSetCount &&
+      this.tileGeneration === this.lastSetGeneration
+    ) {
+      return;
+    }
+    this.lastSetCount = tiles.length;
+    this.lastSetGeneration = this.tileGeneration;
+
     this.instanceCount = tiles.length;
     this.ensureInstanceBuffer(tiles.length);
 
@@ -155,6 +168,7 @@ export class WebGPURenderer {
       { texture: this.texture, origin: { x: 0, y: 0, z: layer } },
       { width, height }
     );
+    this.tileGeneration += 1;
   }
 
   render(clearColor: GPUColor = { r: 0.96, g: 0.94, b: 0.91, a: 1 }): void {
@@ -162,7 +176,7 @@ export class WebGPURenderer {
       return;
     }
 
-    this.configureCanvas();
+    this.ensureCanvasSize();
 
     const encoder = this.device.createCommandEncoder();
     const renderPass = encoder.beginRenderPass({
@@ -203,6 +217,15 @@ export class WebGPURenderer {
     if (!this.context || !this.device || !this.format) {
       return;
     }
+    this.ensureCanvasSize();
+    this.context.configure({
+      device: this.device,
+      format: this.format,
+      alphaMode: "opaque",
+    });
+  }
+
+  private ensureCanvasSize(): void {
     const pixelRatio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(this.canvas.clientWidth * pixelRatio));
     const height = Math.max(1, Math.floor(this.canvas.clientHeight * pixelRatio));
@@ -210,12 +233,6 @@ export class WebGPURenderer {
       this.canvas.width = width;
       this.canvas.height = height;
     }
-
-    this.context.configure({
-      device: this.device,
-      format: this.format,
-      alphaMode: "opaque",
-    });
   }
 
   private createPipeline(): void {

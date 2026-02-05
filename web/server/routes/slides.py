@@ -80,7 +80,7 @@ def create_slides_router(slides: dict[str, SlideRecord]) -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/slides")
-    def list_slides() -> list[dict]:
+    def list_slides() -> JSONResponse:
         response = []
         for record in slides.values():
             metadata = record.metadata
@@ -94,13 +94,30 @@ def create_slides_router(slides: dict[str, SlideRecord]) -> APIRouter:
                     "thumbnailUrl": f"/slides/{record.slide_id}/thumbnail.jpg",
                 }
             )
-        return response
+        return JSONResponse(
+            content=response,
+            headers={"Cache-Control": "public, max-age=60"},
+        )
 
     @router.get("/api/slides/{slide_id}/metadata")
     def get_metadata(slide_id: str) -> JSONResponse:
         record = slides.get(slide_id)
         if not record:
             raise HTTPException(status_code=404, detail="Slide not found")
-        return JSONResponse(record.metadata)
+        content = dict(record.metadata)
+        pack_sizes: dict[str, int] = {}
+        tiles_dir = record.dir_path / "tiles"
+        for level_info in content.get("levels", []):
+            level_num = level_info.get("level")
+            if level_num is None:
+                continue
+            pack_file = tiles_dir / f"level_{level_num}.pack"
+            if pack_file.exists():
+                pack_sizes[str(level_num)] = pack_file.stat().st_size
+        content["pack_sizes"] = pack_sizes
+        return JSONResponse(
+            content=content,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     return router

@@ -28,10 +28,6 @@ export class TileCache<T> {
     }
   }
 
-  has(key: string): boolean {
-    return this.map.has(key);
-  }
-
   clear(): void {
     this.map.clear();
   }

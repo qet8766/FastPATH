@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-FastPATH is split into a viewer and a preprocessing CLI. Python sources live in `src/fastpath/`: `ui/` (PySide6 + QML), `ui/qml/` (QML components and `style/Theme.qml`), `preprocess/` (CLI pipeline, pyvips), `core/` (shared data like `core/types.py`), `ai/` (plugin system), and `config.py` (shared settings). The viewer and preprocessing modules must not import each other; they only share `core/types.py` and `preprocess/backends.py` and communicate via the filesystem (`.fastpath` output). The Rust tile scheduler is in `src/fastpath_core/` and is built via maturin. Tests are in `tests/`; sample slides live in `WSI_examples/`.
+FastPATH is split into a viewer and a preprocessing CLI. Python sources live in `src/fastpath/`: `ui/` (PySide6 + QML), `ui/qml/` (QML components and `style/Theme.qml`), `preprocess/` (CLI pipeline, pyvips), `core/` (shared data like `core/types.py`), `plugins/` (plugin system), and `config.py` (shared settings). The viewer and preprocessing modules must not import each other; they only share `core/types.py` and `preprocess/backends.py` and communicate via the filesystem (`.fastpath` output). The Rust tile scheduler is in `src/fastpath_core/` and is built via maturin. Tests are in `tests/`; sample slides live in `WSI_examples/`.
 
 ## Build, Test, and Development Commands
 - `uv sync` — install Python deps.

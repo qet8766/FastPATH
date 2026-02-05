@@ -78,11 +78,12 @@ export class FastPATHViewer {
     return metadata;
   }
 
-  updateViewport(viewport: Viewport): void {
+  updateViewport(viewport: Partial<Viewport>): void {
     this.state.updateViewport(viewport);
-    this.input.updateViewport(viewport);
-    this.scheduler.updateViewport(viewport);
-    this.onViewportChange?.(viewport);
+    const merged = this.state.viewport;
+    this.input.updateViewport(merged);
+    this.scheduler.updateViewport(merged);
+    this.onViewportChange?.(merged);
   }
 
   getViewport(): Viewport {

@@ -17,6 +17,12 @@ export class SlideIndexStore {
   constructor(baseUrl: string, metadata: SlideMetadata) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.metadata = metadata;
+
+    if (metadata.pack_sizes) {
+      for (const [level, size] of Object.entries(metadata.pack_sizes)) {
+        this.packSizes.set(Number(level), size);
+      }
+    }
   }
 
   async load(): Promise<void> {
@@ -41,12 +47,13 @@ export class SlideIndexStore {
   }
 
   private async loadLevel(level: number): Promise<void> {
-    const [index, packSize] = await Promise.all([
-      this.fetchIndex(this.idxUrl(level)),
-      this.fetchPackSize(this.packUrl(level)),
-    ]);
+    const index = await this.fetchIndex(this.idxUrl(level));
     this.indices.set(level, index);
-    this.packSizes.set(level, packSize);
+
+    if (!this.packSizes.has(level)) {
+      const packSize = await this.fetchPackSize(this.packUrl(level));
+      this.packSizes.set(level, packSize);
+    }
   }
 
   private async fetchIndex(url: string): Promise<LevelIndex> {

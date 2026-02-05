@@ -113,10 +113,6 @@ export class TileScheduler {
     }
   }
 
-  getGeneration(): number {
-    return this.generation;
-  }
-
   updateViewport(viewport: Viewport): void {
     this.viewport = viewport;
     this.scheduleRender();
@@ -165,16 +161,18 @@ export class TileScheduler {
     }
 
     if (this.fallbackActive && visible.length > 0) {
-      const ratio = cacheMissRatio(visible.length, cached.length);
-      if (ratio <= this.cacheMissThreshold) {
+      if (cached.length >= visible.length) {
         this.fallbackActive = false;
         this.fallbackInstances = [];
       }
     }
 
-    const renderInstances = this.fallbackActive
-      ? [...this.fallbackInstances, ...cached]
-      : cached;
+    // Always draw fallback tiles underneath new-level tiles so the
+    // background never shows through during zoom transitions.
+    const renderInstances =
+      this.fallbackInstances.length > 0
+        ? [...this.fallbackInstances, ...cached]
+        : cached;
 
     this.currentInstances = cached;
 

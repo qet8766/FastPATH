@@ -86,4 +86,5 @@ dev = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "httpx>=0.26",
+    "pytest-playwright>=0.7.2",
 ]

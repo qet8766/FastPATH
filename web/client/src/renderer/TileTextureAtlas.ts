@@ -73,15 +73,6 @@ export class TileTextureAtlas {
     return { layer: lru.layer, evictedKey: lru.key };
   }
 
-  release(key: string): void {
-    const entry = this.entries.get(key);
-    if (!entry) {
-      return;
-    }
-    this.entries.delete(key);
-    this.freeLayers.push(entry.layer);
-  }
-
   private findLru(): AtlasEntry | null {
     let best: AtlasEntry | null = null;
     for (const entry of this.entries.values()) {

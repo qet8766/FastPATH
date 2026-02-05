@@ -19,6 +19,7 @@ export interface SlideMetadata {
   target_magnification?: number;
   background_color?: [number, number, number];
   tile_format?: string;
+  pack_sizes?: Record<string, number>;
 }
 
 export interface SlideSummary {
