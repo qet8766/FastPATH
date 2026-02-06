@@ -21,8 +21,8 @@ from fastpath_core import RustTileScheduler
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from fastpath.core.annotations import AnnotationManager
-    from fastpath.core.slide import SlideManager
+    from fastpath.ui.annotations import AnnotationManager
+    from fastpath.ui.slide import SlideManager
 
 
 def _parse_tile_url(id: str) -> tuple[int, int, int, int] | None:

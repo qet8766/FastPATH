@@ -54,4 +54,3 @@ def atomic_json_save(path: Path, data: Any) -> None:
         except OSError:
             pass
         raise
-

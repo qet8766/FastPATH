@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from fastpath.core.types import LevelInfo
+from fastpath.types import LevelInfo
 from fastpath.preprocess.metadata import PyramidMetadata
 from fastpath.preprocess.pyramid import VipsPyramidBuilder
 

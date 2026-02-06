@@ -16,7 +16,7 @@ from typing import Any, TypedDict
 from PySide6.QtCore import QObject, Signal, Slot, Property
 from rtree import index
 
-from fastpath.core.paths import atomic_json_save, to_local_path
+from fastpath.ui.paths import atomic_json_save, to_local_path
 
 logger = logging.getLogger(__name__)
 

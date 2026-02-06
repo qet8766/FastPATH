@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
-from fastpath.core.annotations import AnnotationManager
+from fastpath.ui.annotations import AnnotationManager
 from fastpath.ui.providers import AnnotationTileImageProvider
 
 

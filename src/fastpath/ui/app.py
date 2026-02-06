@@ -14,10 +14,10 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
 from fastpath.config import L1_CACHE_SIZE_MB, L2_CACHE_SIZE_MB, PREFETCH_DISTANCE, CACHE_MISS_THRESHOLD
-from fastpath.core.paths import to_local_path
-from fastpath.core.slide import SlideManager
-from fastpath.core.annotations import AnnotationManager
-from fastpath.core.project import ProjectManager
+from fastpath.ui.paths import to_local_path
+from fastpath.ui.slide import SlideManager
+from fastpath.ui.annotations import AnnotationManager
+from fastpath.ui.project import ProjectManager
 from fastpath.plugins.controller import PluginController
 from fastpath.ui.providers import TileImageProvider, ThumbnailProvider, AnnotationTileImageProvider
 from fastpath.ui.models import TileModel, RecentFilesModel

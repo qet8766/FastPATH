@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
 from fastpath.config import DEFAULT_TILE_SIZE
-from fastpath.core.types import LevelInfo
+from fastpath.types import LevelInfo
 
 logger = logging.getLogger(__name__)
 

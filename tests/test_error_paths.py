@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from fastpath.core.slide import SlideManager
-from fastpath.core.annotations import AnnotationManager
-from fastpath.core.project import ProjectManager
+from fastpath.ui.slide import SlideManager
+from fastpath.ui.annotations import AnnotationManager
+from fastpath.ui.project import ProjectManager
 
 
 class TestSlideManagerErrors:

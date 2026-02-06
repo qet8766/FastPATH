@@ -16,7 +16,7 @@ from fastpath.config import (
     THUMBNAIL_JPEG_QUALITY,
     THUMBNAIL_MAX_SIZE,
 )
-from fastpath.core.types import LevelInfo
+from fastpath.types import LevelInfo
 
 from .metadata import PyramidMetadata, PyramidStatus, check_pyramid_status, pyramid_dir_for_slide
 

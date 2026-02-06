@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from fastpath.core.types import LevelInfo
+from fastpath.types import LevelInfo
 
 logger = logging.getLogger(__name__)
 

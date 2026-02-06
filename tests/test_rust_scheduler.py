@@ -271,7 +271,7 @@ class TestRustSchedulerComparisonWithPython:
 
     def test_metadata_consistency(self, mock_fastpath_dir: Path, qapp):
         """Test that metadata is consistent between Rust and Python."""
-        from fastpath.core.slide import SlideManager
+        from fastpath.ui.slide import SlideManager
 
         rust_scheduler = RustTileScheduler()
         rust_scheduler.load(str(mock_fastpath_dir))

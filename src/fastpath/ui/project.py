@@ -11,7 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
-from fastpath.core.paths import atomic_json_save
+from fastpath.ui.paths import atomic_json_save
 
 logger = logging.getLogger(__name__)
 

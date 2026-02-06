@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fastpath.core.annotations import (
+from fastpath.ui.annotations import (
     Annotation,
     AnnotationManager,
     AnnotationType,

@@ -11,9 +11,9 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from fastpath.ui.app import AppController
-from fastpath.core.slide import SlideManager
-from fastpath.core.annotations import AnnotationManager
-from fastpath.core.project import ProjectManager
+from fastpath.ui.slide import SlideManager
+from fastpath.ui.annotations import AnnotationManager
+from fastpath.ui.project import ProjectManager
 from fastpath.plugins.controller import PluginController
 from fastpath.ui.settings import Settings
 

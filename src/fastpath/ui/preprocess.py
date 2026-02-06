@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Property, QThread, Slot
 
-from fastpath.core.paths import to_local_path
+from fastpath.ui.paths import to_local_path
 from fastpath.config import VIPS_CONCURRENCY, WSI_EXTENSIONS
 from fastpath.ui.models import (
     FileListModel,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fastpath.core.slide import SlideManager
+from fastpath.ui.slide import SlideManager
 
 
 @pytest.fixture

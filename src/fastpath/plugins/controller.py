@@ -11,7 +11,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
-from fastpath.core.annotations import AnnotationManager
+from fastpath.ui.annotations import AnnotationManager
 
 from .base import ModelPlugin, Plugin
 from .executor import PluginExecutor

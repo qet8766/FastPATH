@@ -1,6 +1,6 @@
 """SlideContext — read-only access to a .fastpath pyramid directory.
 
-Plain Python class (not QObject). Does NOT import ``core/slide.py``.
+Plain Python class (not QObject). Does NOT import ``ui/slide.py``.
 Reads the pyramid metadata and tiles directly from the filesystem.
 """
 
@@ -13,7 +13,7 @@ from typing import Iterator
 
 import numpy as np
 
-from fastpath.core.types import LevelInfo
+from fastpath.types import LevelInfo
 
 from .types import RegionOfInterest
 
