@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-FastPATH is a pathology whole-slide image (WSI) viewer with a separate preprocessing CLI. Hybrid Python + QML + Rust. Requires Python >=3.11.
+FastPATH is a pathology whole-slide image (WSI) viewer with a separate preprocessing CLI and a web viewer. Hybrid Python + QML + Rust (desktop), React + TypeScript + WebGPU (web). Requires Python >=3.11.
 
 ## Module Boundaries
 
-The codebase has two independent workloads that share only data classes and a pyvips wrapper. **When working on one side, you can ignore the other.**
+The codebase has three independent workloads that share only data classes and a pyvips wrapper. **When working on one side, you can ignore the others.**
 
 ```
 src/fastpath/
@@ -14,48 +14,78 @@ src/fastpath/
 ├── core/
 │   ├── types.py       # TileCoord, LevelInfo — shared data classes (no logic)
 │   ├── slide.py       # SlideManager (metadata, viewport, level selection)
-│   └── annotations.py # AnnotationManager (spatial indexing, GeoJSON)
+│   ├── annotations.py # AnnotationManager (spatial indexing, GeoJSON)
+│   ├── paths.py       # Path utilities (QML URL → filesystem, atomic JSON save)
+│   └── project.py     # ProjectManager (.fpproj files — slide path, annotations, view state)
 ├── preprocess/        # PREPROCESSING ONLY — standalone CLI
 │   ├── pyramid.py     # VipsPyramidBuilder (pyvips dzsave)
 │   ├── metadata.py    # PyramidMetadata, PyramidStatus, validation
 │   ├── worker.py      # Batch worker (separate module for Windows mp compat)
-│   └── backends.py    # pyvips wrapper (also used by viewer + AI)
-├── ui/                # VIEWER ONLY
+│   └── backends.py    # pyvips wrapper (also used by viewer + plugins)
+├── ui/                # DESKTOP VIEWER ONLY
 │   ├── app.py         # AppController — main entry, coordinates everything
 │   ├── providers.py   # TileImageProvider (QML → Rust bridge)
 │   ├── models.py      # TileModel, RecentFilesModel, FileListModel
-│   └── qml/           # QML components (SlideViewer, TileLayer, Theme)
-└── plugins/           # VIEWER ONLY
+│   ├── navigator.py   # SlideNavigator (multi-slide directory navigation)
+│   ├── settings.py    # QSettings wrapper (persistent viewer/preprocessing prefs)
+│   ├── preprocess.py  # In-app preprocessing UI controller
+│   └── qml/           # QML components (SlideViewer, TileLayer, Theme, panels)
+└── plugins/           # DESKTOP VIEWER ONLY
     ├── base.py        # Plugin / ModelPlugin ABCs
     ├── types.py       # PluginMetadata, PluginOutput, RegionOfInterest
     ├── registry.py    # PluginRegistry (discovery, registration)
     ├── executor.py    # PluginExecutor (worker thread, SlideContext bridge)
     ├── controller.py  # PluginController (QML facade)
     ├── context.py     # SlideContext (tile access for plugins)
-    └── examples/      # Built-in demo plugins
+    ├── examples/      # Built-in demo plugins
+    └── nulite/        # Nucleus segmentation plugin (FastViT model)
 
-src/fastpath_core/src/ (Rust, PyO3/maturin — VIEWER ONLY)
+src/fastpath_core/src/ (Rust, PyO3/maturin — DESKTOP VIEWER ONLY)
 ├── lib.rs             # PyO3 RustTileScheduler (Python-facing wrapper)
 ├── scheduler.rs       # TileScheduler (orchestrates cache + prefetch + dedup)
 ├── cache.rs           # moka tile cache (TinyLFU eviction)
 ├── prefetch.rs        # Viewport-based prefetching, rayon thread pool
 ├── format.rs          # SlideMetadata, TilePathResolver (.fastpath layout)
 ├── decoder.rs         # zune-jpeg SIMD JPEG decoding
+├── pack.rs            # Packed tile reader (pack_v2 format: .pack + .idx files)
+├── bulk_preload.rs    # Background L2 cache preloader (dedicated 3-thread rayon pool)
+├── slide_pool.rs      # Metadata pool — caches SlideEntry by slide_id
+├── tile_buffer.rs     # Tile buffer management
+├── tile_reader.rs     # Tile reading abstractions
+├── test_utils.rs      # Test utilities
 └── error.rs           # TileError enum
+
+web/                   # WEB VIEWER — fully independent from desktop viewer
+├── server/            # FastAPI backend (API only; Caddy serves static + slides)
+│   ├── main.py        # FastAPI app (builds junctions, API routes only)
+│   ├── routes/slides.py  # Slide indexing and metadata endpoints
+│   └── config.py      # ServerConfig (slide dirs + junction dir)
+├── Caddyfile          # Production Caddy config (SPA + slides + /api proxy)
+├── Caddyfile.dev      # Dev Caddy config (SPA via Vite, still single-origin)
+├── client/            # React + TypeScript + Vite + WebGPU frontend
+│   └── src/
+│       ├── renderer/  # WebGPU renderer, texture atlas, WGSL shaders
+│       ├── scheduler/ # Tile scheduling (mirrors Rust scheduler logic)
+│       ├── network/   # Pack v2 network layer (Range requests for tile data)
+│       ├── workers/   # Decode web workers
+│       ├── viewer/    # Viewer component and input handling
+│       └── cache/     # Browser-side tile cache
+└── tests/             # Server (pytest) + client (vitest) tests
 ```
 
 ### Cross-dependency summary
 
 | Working on… | Read these | Safe to ignore |
 |---|---|---|
-| **Viewer (UI/rendering)** | `ui/`, `core/`, `plugins/`, `fastpath_core/`, `config.py` | `preprocess/` (only lazy-imported for in-app preprocessing) |
-| **Preprocessing CLI** | `preprocess/`, `core/types.py`, `config.py` | `ui/`, `plugins/`, `core/slide.py`, `core/annotations.py`, `fastpath_core/` |
-| **Rust tile scheduler** | `src/fastpath_core/src/` | All Python except `ui/app.py` and `ui/providers.py` (callers) |
-| **Plugins** | `plugins/`, `preprocess/backends.py` | `preprocess/pyramid.py`, `preprocess/worker.py`, `fastpath_core/` |
+| **Desktop viewer (UI/rendering)** | `ui/`, `core/`, `plugins/`, `fastpath_core/`, `config.py` | `preprocess/` (only lazy-imported for in-app preprocessing), `web/` |
+| **Preprocessing CLI** | `preprocess/`, `core/types.py`, `config.py` | `ui/`, `plugins/`, `core/slide.py`, `core/annotations.py`, `fastpath_core/`, `web/` |
+| **Rust tile scheduler** | `src/fastpath_core/src/` | All Python except `ui/app.py` and `ui/providers.py` (callers), `web/` |
+| **Plugins** | `plugins/`, `preprocess/backends.py` | `preprocess/pyramid.py`, `preprocess/worker.py`, `fastpath_core/`, `web/` |
+| **Web viewer** | `web/` | All of `src/` (web reads `.fastpath` dirs from disk, no Python imports) |
 
 ### Communication between sides
 
-The two sides communicate only through the filesystem: preprocessing writes `.fastpath` directories, the viewer reads them. No runtime imports cross the boundary (the viewer's lazy import of preprocessing is optional, for in-app preprocessing UX).
+All three sides communicate only through the filesystem: preprocessing writes `.fastpath` directories, the desktop viewer and web server read them. No runtime imports cross boundaries (the desktop viewer's lazy import of preprocessing is optional, for in-app preprocessing UX).
 
 ## Critical: Slide Loading Order
 
@@ -100,17 +130,41 @@ CLI options: `--tile-size/-t` (64-2048, default 512), `--parallel-slides/-p` (de
 ## Development Commands
 
 ```bash
+# Setup & build
 uv sync                                                                    # Install deps
 uv run maturin develop --release --manifest-path src/fastpath_core/Cargo.toml  # Build Rust (required, slow: LTO enabled)
+
+# Desktop viewer
 uv run python -m fastpath                                                  # Run viewer
 uv run python -m fastpath.preprocess <input.svs> -o <output_dir>           # Run preprocessing
-uv run python -m pytest tests/                                             # All tests
+
+# Web viewer (Caddy front door; single-origin)
+$env:FASTPATH_WEB_SLIDE_DIRS="C:\path\to\slides"                          # Point to .fastpath dirs
+$env:FASTPATH_WEB_JUNCTION_DIR="C:\path\to\junctions"                     # Optional (default .fastpath_junctions)
+$env:FASTPATH_WEB_HTTPS_ADDR="https://localhost"                          # Optional (use :8443 if 443 is blocked)
+uv run --group dev uvicorn web.server.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Option A: no HMR (Caddy serves built SPA)
+cd web/client && npm install && npm run build
+$env:FASTPATH_WEB_DIST_DIR="C:\chest\projects\fastpath_web\web\client\dist"
+caddy run --config web/Caddyfile
+# If the browser blocks https://localhost, run: caddy trust
+
+# Option B: HMR (Caddy stays front door, SPA via Vite)
+cd web/client && npm install && npm run dev                                # Vite dev server at :5173
+caddy run --config web/Caddyfile.dev                                      # Browse http://127.0.0.1:8080
+
+# Testing
+uv run python -m pytest tests/                                             # Python tests (desktop)
+uv run python -m pytest web/tests/                                         # Python tests (web server)
 uv run python -m pytest tests/test_annotations.py -k "test_name"           # Single test
+cd web/client && npm test                                                  # Web client tests (vitest)
+cd web/client && npm run build && cd ../.. && uv run python -m pytest web/tests/e2e/  # E2E tests (requires built client)
 cd src/fastpath_core && cargo test                                         # Rust tests
 cd src/fastpath_core && cargo clippy -- -D warnings                        # Rust lint (must pass clean)
 ```
 
-The Rust release build uses `lto = true` and `codegen-units = 1` for maximum optimization, which makes builds slow. For faster iteration during Rust development, temporarily remove these from `Cargo.toml` or use `maturin develop` without `--release`.
+The Rust release build uses `lto = true` and `codegen-units = 1` for maximum optimization, which makes builds slow. For faster iteration, use `--profile dev-fast` (opt-level 2, no LTO): `uv run maturin develop --profile dev-fast --manifest-path src/fastpath_core/Cargo.toml`.
 
 **IMPORTANT:** Always rebuild with `--release` after making Rust changes. Debug builds cause RAM explosion (system commit + physical memory) and severe performance degradation. Never leave a debug build installed for real usage.
 
@@ -124,7 +178,7 @@ The Rust release build uses `lto = true` and `codegen-units = 1` for maximum opt
 
 ## Environment Variables
 
-All overridable in `config.py`:
+Desktop viewer — all overridable in `config.py`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -134,6 +188,15 @@ All overridable in `config.py`:
 | `FASTPATH_PREFETCH_DISTANCE` | `3` | Tiles to prefetch ahead |
 | `FASTPATH_VIPS_CONCURRENCY` | `24` | VIPS internal thread count |
 | `FASTPATH_TILE_TIMING` | unset | Set to `1` for per-tile disk/decode/total timing on stderr |
+
+Web viewer — in `web/server/config.py`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `FASTPATH_WEB_SLIDE_DIRS` | cwd | Semicolon-separated paths to directories containing `.fastpath` dirs |
+| `FASTPATH_WEB_JUNCTION_DIR` | `.fastpath_junctions` | Directory where `{slide_id}` junctions are created |
+| `FASTPATH_WEB_DIST_DIR` | `web/client/dist` | Caddy SPA build output directory |
+| `VITE_FASTPATH_API_BASE` | — | Client-side API base (only if bypassing Caddy in dev) |
 
 ## Windows Notes
 
@@ -152,9 +215,7 @@ All overridable in `config.py`:
 - **L2 cache verification**: `cache_stats()` — L2 hits should be nonzero when reopening a previously-viewed slide
 - **Per-tile timing**: Set `FASTPATH_TILE_TIMING=1` for `[TILE TIMING]` lines on stderr showing disk/L2/decode/total breakdowns
 
-## Git Worktree Workflow
-
-This project uses git worktrees for parallel feature development. Each feature branch gets its own working directory with independent `.venv` and Rust build artifacts.
+## Git Conventions
 
 ### Branch naming
 
@@ -162,34 +223,37 @@ This project uses git worktrees for parallel feature development. Each feature b
 - `fix/<name>` — bug fixes
 - `infra/<name>` — tooling, CI, build changes
 
-### Worktree scripts
+### Merge strategy
 
-```powershell
-.\scripts\new-worktree.ps1 -Branch feature/annotations           # Full release build
-.\scripts\new-worktree.ps1 -Branch feature/ui-polish -Fast        # Fast Rust build (no LTO)
-.\scripts\remove-worktree.ps1 -Branch feature/annotations         # Clean up
-.\scripts\remove-worktree.ps1 -Branch feature/test -DeleteBranch  # Clean up + delete branch
-```
-
-Worktrees are created at `C:\chest\projects\FastPATH-wt-<branch-slug>\` (sibling directories).
+Rebase onto master, fast-forward merge.
 
 ### Rust build profiles
 
 - `--release` — full LTO, slow build, maximum performance (production)
 - `--profile dev-fast` — opt-level 2, no LTO, fast build (feature branches that don't touch Rust)
 
-### Merge strategy
-
-1. Rebase onto master, fast-forward merge
-2. Recommended merge order (minimizes conflicts):
-   1. `feature/preprocessing` — isolated module, zero conflict risk
-   2. `feature/rust-performance` — isolated module, zero conflict risk
-   3. `feature/frontend-ui` — minimal `main.qml` touch
-   4. `feature/annotations` — `InteractionLayer` + sidebar + menu
-   5. `feature/ai-plugins` — `InteractionLayer` + sidebar + `app.py` (last, rebases on annotation changes)
-
 ### Modular QML architecture
 
-Sidebar panels are extracted into individual components (`SlideInfoPanel`, `OverviewPanel`, `ViewControlsPanel`, `NavigationPanel`). Feature branches add new panels as single-line additions to the `ColumnLayout` in `main.qml`'s sidebar — these merge cleanly across branches.
+Sidebar panels are extracted into individual components (`SlideInfoPanel`, `OverviewPanel`, `ViewControlsPanel`, `NavigationPanel`). New panels are added as single-line additions to the `ColumnLayout` in `main.qml`'s sidebar.
 
-`InteractionLayer.qml` in `SlideViewer.qml` is a mode-based overlay (`"none"`, `"draw"`, `"roi"`, `"measure"`). Feature branches extend it by adding handlers for their specific modes in separate code sections.
+`InteractionLayer.qml` in `SlideViewer.qml` is a mode-based overlay (`"none"`, `"draw"`, `"roi"`, `"measure"`). New modes are added by extending handlers in separate code sections.
+
+## Web Viewer Architecture
+
+The web viewer is a separate stack that reads the same `.fastpath` directories produced by preprocessing. It does not import any Python from the desktop viewer.
+
+- **Server**: FastAPI serves API only (`/api/slides`, `/api/slides/<hash>/metadata`) and creates Windows junctions for slide data.
+- **Caddy**: Front door for browsers; serves the SPA, `/slides/{id}` from junctions, and reverse-proxies `/api/*` to uvicorn. Handles Range requests and can enable HTTP/3.
+- **Client**: React + Vite app with a custom **WebGPU** renderer. Tile scheduling, decode workers, and caching are implemented in TypeScript, mirroring the Rust scheduler's logic. WGSL shaders handle tile compositing.
+- **Pack v2 index format**: Magic `FPLIDX1\0`, version 1, 16-byte header, 12-byte entries (`u64 offset` + `u32 length`), `u16` cols/rows, row-major ordering. `length == 0` means missing tile.
+
+### Web Client Tile Scheduler
+
+The TypeScript `TileScheduler` (`web/client/src/scheduler/TileScheduler.ts`) mirrors the Rust scheduler's logic:
+
+- **Generation counter**: Monotonic counter bumped on `open()`/`close()`. Stale requests (from previous slide) are discarded at multiple checkpoints.
+- **Abortable fetches**: Network requests store abort handles. When viewport changes, `cancelStaleRequests()` aborts in-flight requests for tiles no longer needed, freeing bandwidth for current viewport.
+- **Fallback tiles**: During zoom transitions, previous-level tiles render underneath new-level tiles to prevent gray flicker. `fallbackInstances` cleared once new level fully loads.
+- **Pending queue**: `pending[]` + `pendingKeys` Set for O(1) dedup. Items store pre-computed tile keys to avoid repeated string allocations.
+
+With the Caddy-mandatory model, browse through Caddy even during HMR (`web/Caddyfile.dev`).

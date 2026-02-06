@@ -48,7 +48,7 @@ def _map_stage_to_progress(stage: str, current: int, total: int) -> float:
     elif stage == "dzsave_progress":
         # Map 0-100% dzsave progress to 0.04-0.98 overall range
         return 0.04 + 0.94 * (current / max(total, 1))
-    elif stage.startswith("level_"):
+    elif stage == "packing":
         return 0.98 + 0.02 * (current / max(total, 1))
     return 0.5
 
@@ -66,6 +66,7 @@ class PreprocessWorker(QThread):
         output_dir: str,
         tile_size: int = 512,
         force: bool = False,
+        native_mpp: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,6 +74,7 @@ class PreprocessWorker(QThread):
         self.output_dir = Path(output_dir)
         self.tile_size = tile_size
         self.force = force
+        self.native_mpp = native_mpp
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -96,7 +98,7 @@ class PreprocessWorker(QThread):
                     "Please install libvips with OpenSlide enabled."
                 )
 
-            builder = VipsPyramidBuilder(tile_size=self.tile_size)
+            builder = VipsPyramidBuilder(tile_size=self.tile_size, native_mpp=self.native_mpp)
 
             _stage_labels = {
                 "load": "Loading slide...",
@@ -111,6 +113,8 @@ class PreprocessWorker(QThread):
                 progress = _map_stage_to_progress(stage, current, total)
                 if stage == "dzsave_progress":
                     status = f"Generating tiles: {current}%"
+                elif stage == "packing":
+                    status = f"Packing tiles: level {current}/{total}"
                 else:
                     status = _stage_labels.get(stage, f"{stage}: {current}/{total}")
                 self.progressChanged.emit(progress, status)
@@ -150,6 +154,7 @@ class BatchPreprocessWorker(QThread):
         output_dir: str,
         tile_size: int = 512,
         force: bool = False,
+        native_mpp: bool = False,
         parallel_workers: int = 3,
         parent: QObject | None = None,
     ) -> None:
@@ -158,6 +163,7 @@ class BatchPreprocessWorker(QThread):
         self._output_dir = Path(output_dir)
         self._tile_size = tile_size
         self._force = force
+        self._native_mpp = native_mpp
         self._parallel = parallel_workers
         self._cancelled = False
         self._completed_count = 0
@@ -170,7 +176,7 @@ class BatchPreprocessWorker(QThread):
     def run(self) -> None:
         """Run parallel batch preprocessing."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from fastpath.preprocess.metadata import check_pyramid_status, PyramidStatus
+        from fastpath.preprocess.metadata import check_pyramid_status, PyramidStatus, pyramid_dir_for_slide
         from fastpath.preprocess.pyramid import VipsPyramidBuilder
 
         processed = 0
@@ -195,8 +201,7 @@ class BatchPreprocessWorker(QThread):
                 slide_path = Path(file_path)
 
                 # Check if already exists
-                pyramid_name = slide_path.stem + ".fastpath"
-                pyramid_dir = self._output_dir / pyramid_name
+                pyramid_dir = pyramid_dir_for_slide(slide_path, self._output_dir, native_mpp=self._native_mpp)
                 status = check_pyramid_status(pyramid_dir)
 
                 if status == PyramidStatus.COMPLETE and not self._force:
@@ -204,7 +209,7 @@ class BatchPreprocessWorker(QThread):
                     return (index, STATUS_SKIPPED, None)
 
                 # Build pyramid
-                builder = VipsPyramidBuilder(tile_size=self._tile_size)
+                builder = VipsPyramidBuilder(tile_size=self._tile_size, native_mpp=self._native_mpp)
 
                 def progress_cb(stage: str, current: int, total: int) -> None:
                     if self._cancelled:
@@ -438,6 +443,7 @@ class PreprocessController(QObject):
     skippedCountChanged = Signal()
     errorCountChanged = Signal()
     forceChanged = Signal()
+    nativeMppChanged = Signal()
     parallelWorkersChanged = Signal()
     batchCompleteChanged = Signal()
     firstResultPathChanged = Signal()
@@ -472,6 +478,7 @@ class PreprocessController(QObject):
         self._skipped_count = 0
         self._error_count = 0
         self._force = False
+        self._native_mpp = False
         self._parallel_workers = 3
         self._batch_complete = False
         self._first_result_path = ""
@@ -597,6 +604,16 @@ class PreprocessController(QObject):
         if self._force != value:
             self._force = value
             self.forceChanged.emit()
+
+    @Property(bool, notify=nativeMppChanged)
+    def nativeMpp(self) -> bool:
+        return self._native_mpp
+
+    @nativeMpp.setter
+    def nativeMpp(self, value: bool) -> None:
+        if self._native_mpp != value:
+            self._native_mpp = value
+            self.nativeMppChanged.emit()
 
     @Property(int, notify=parallelWorkersChanged)
     def parallelWorkers(self) -> int:
@@ -759,7 +776,7 @@ class PreprocessController(QObject):
 
     @Slot(int)
     def startPreprocess(self, tile_size: int) -> None:
-        """Start preprocessing with given tile size. Always 0.5 MPP, JPEG Q80."""
+        """Start preprocessing with given tile size. JPEG Q80."""
         if self._is_processing:
             return
 
@@ -790,6 +807,7 @@ class PreprocessController(QObject):
             self._output_dir,
             tile_size,
             self._force,
+            self._native_mpp,
             self,
         )
         self._worker.progressChanged.connect(self._on_progress)
@@ -847,6 +865,11 @@ class PreprocessController(QObject):
         """Set force rebuild flag."""
         self.force = value
 
+    @Slot(bool)
+    def setNativeMpp(self, value: bool) -> None:
+        """Set native MPP mode flag."""
+        self.nativeMpp = value
+
     @Slot(int)
     def setParallelWorkers(self, value: int) -> None:
         """Set number of parallel workers (1-8)."""
@@ -854,7 +877,7 @@ class PreprocessController(QObject):
 
     @Slot(int)
     def startBatchPreprocess(self, tile_size: int) -> None:
-        """Start batch preprocessing of all files in folder. Always 0.5 MPP, JPEG Q80."""
+        """Start batch preprocessing of all files in folder. JPEG Q80."""
         if self._is_processing:
             return
 
@@ -879,6 +902,7 @@ class PreprocessController(QObject):
             self._output_dir,
             tile_size,
             self._force,
+            self._native_mpp,
             self._parallel_workers,
             self,
         )
@@ -895,7 +919,8 @@ class PreprocessController(QObject):
         if status == STATUS_DONE and not self._first_result_path:
             file_path = self._file_list_model.getFilePath(index)
             if file_path:
-                pyramid_name = Path(file_path).stem + ".fastpath"
+                ext = ".fastpath_native" if self._native_mpp else ".fastpath"
+                pyramid_name = Path(file_path).stem + ext
                 self._first_result_path = str(Path(self._output_dir) / pyramid_name)
                 self.firstResultPathChanged.emit()
 

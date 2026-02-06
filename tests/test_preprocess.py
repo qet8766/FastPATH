@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from fastpath.core.types import LevelInfo
+from fastpath.preprocess.metadata import PyramidMetadata
 from fastpath.preprocess.pyramid import VipsPyramidBuilder
 
 
@@ -137,3 +138,49 @@ class TestPreprocessIntegration:
         # Higher level numbers have more tiles
         assert level2 > level1 > level0
         assert level0 >= 1
+
+
+class TestPyramidMetadataNativeMpp:
+    """Tests for native_mpp_mode field in PyramidMetadata."""
+
+    _SAMPLE_LEVELS = [LevelInfo(level=0, downsample=1, cols=1, rows=1)]
+
+    def _make_metadata(self, native_mpp_mode: bool = False) -> PyramidMetadata:
+        return PyramidMetadata(
+            version="1.0",
+            source_file="test.svs",
+            source_mpp=0.25,
+            target_mpp=0.25 if native_mpp_mode else 0.5,
+            target_magnification=40.0 if native_mpp_mode else 20.0,
+            tile_size=512,
+            dimensions=(1024, 1024),
+            levels=self._SAMPLE_LEVELS,
+            background_color=(255, 255, 255),
+            preprocessed_at="2026-01-01T00:00:00+00:00",
+            tile_format="pack_v2",
+            native_mpp_mode=native_mpp_mode,
+        )
+
+    def test_roundtrip_native_mpp_true(self) -> None:
+        """native_mpp_mode=True survives to_dict/from_dict roundtrip."""
+        meta = self._make_metadata(native_mpp_mode=True)
+        data = meta.to_dict()
+        assert data["native_mpp_mode"] is True
+        restored = PyramidMetadata.from_dict(data)
+        assert restored.native_mpp_mode is True
+
+    def test_roundtrip_native_mpp_false(self) -> None:
+        """native_mpp_mode=False survives to_dict/from_dict roundtrip."""
+        meta = self._make_metadata(native_mpp_mode=False)
+        data = meta.to_dict()
+        assert data["native_mpp_mode"] is False
+        restored = PyramidMetadata.from_dict(data)
+        assert restored.native_mpp_mode is False
+
+    def test_backward_compat_missing_key(self) -> None:
+        """Old metadata without native_mpp_mode key defaults to False."""
+        meta = self._make_metadata(native_mpp_mode=False)
+        data = meta.to_dict()
+        del data["native_mpp_mode"]
+        restored = PyramidMetadata.from_dict(data)
+        assert restored.native_mpp_mode is False

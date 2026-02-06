@@ -146,6 +146,7 @@ Item {
             isProcessing: Preprocess.isProcessing
             batchComplete: Preprocess.batchComplete
             force: Preprocess.force
+            nativeMpp: Preprocess.nativeMpp
             errorMessage: root.errorMessage
 
             onBrowseInputFile: inputFileDialog.open()
@@ -153,6 +154,7 @@ Item {
             onBrowseOutputDir: outputDirDialog.open()
             onWorkersActivated: (workers) => Preprocess.setParallelWorkers(workers)
             onForceToggled: (checked) => Preprocess.setForce(checked)
+            onNativeMppToggled: (checked) => Preprocess.setNativeMpp(checked)
         }
 
         // File list (folder mode only)

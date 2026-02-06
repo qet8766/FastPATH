@@ -1,10 +1,13 @@
 //! Packed tile reader for .fastpath directories (pack_v2).
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
+use rayon::prelude::*;
 
 use crate::error::{TileError, TileResult};
 
@@ -222,7 +225,11 @@ impl TilePack {
 /// `fastpath_dir/tiles_files/<level>/<col>_<row>.jpg` (or `.jpeg`).
 ///
 /// Missing tiles are written as zero-length entries.
-pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> TileResult<()> {
+pub fn pack_dzsave_tiles(
+    fastpath_dir: &Path,
+    levels: &[(u32, u32, u32)],
+    progress_cb: Option<Box<dyn Fn(u32, u32) + Send + Sync>>,
+) -> TileResult<()> {
     let tiles_dir = fastpath_dir.join("tiles_files");
     if !tiles_dir.exists() {
         return Err(TileError::Validation(format!(
@@ -234,7 +241,10 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
     let out_dir = fastpath_dir.join("tiles");
     std::fs::create_dir_all(&out_dir)?;
 
-    for (level, cols, rows) in levels {
+    let total_levels = levels.len() as u32;
+    let completed = AtomicU32::new(0);
+
+    levels.par_iter().try_for_each(|(level, cols, rows)| -> TileResult<()> {
         let level_dir = tiles_dir.join(level.to_string());
         if !level_dir.exists() {
             return Err(TileError::Validation(format!(
@@ -250,11 +260,106 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
             TileError::Validation(format!("level {} rows exceeds u16: {}", level, rows))
         })?;
 
+        // One readdir per level instead of 2 * cols * rows stat calls
+        let mut tile_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for entry in std::fs::read_dir(&level_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(stem) = name_str.strip_suffix(".jpg")
+                .or_else(|| name_str.strip_suffix(".jpeg"))
+            {
+                tile_files.insert(stem.to_string(), entry.path());
+            }
+        }
+
         let pack_path = out_dir.join(format!("level_{}.pack", level));
         let idx_path = out_dir.join(format!("level_{}.idx", level));
 
         let pack_file = File::create(&pack_path)?;
         let idx_file = File::create(&idx_path)?;
+        let mut pack_writer = BufWriter::new(pack_file);
+        let mut idx_writer = BufWriter::new(idx_file);
+
+        idx_writer.write_all(LEVEL_MAGIC)?;
+        idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+        idx_writer.write_all(&cols_u16.to_le_bytes())?;
+        idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+        let mut pack_offset: u64 = 0;
+        for row in 0..*rows {
+            for col in 0..*cols {
+                let key = format!("{}_{}", col, row);
+                let tile_path = tile_files.get(&key);
+
+                let Some(tile_path) = tile_path else {
+                    idx_writer.write_all(&0u64.to_le_bytes())?;
+                    idx_writer.write_all(&0u32.to_le_bytes())?;
+                    continue;
+                };
+
+                let data = std::fs::read(tile_path)?;
+                let length: u32 = data.len().try_into().map_err(|_e| {
+                    TileError::Validation(format!(
+                        "Tile too large to pack ({} bytes): {}",
+                        data.len(),
+                        tile_path.display()
+                    ))
+                })?;
+
+                pack_writer.write_all(&data)?;
+
+                idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                idx_writer.write_all(&length.to_le_bytes())?;
+
+                pack_offset = pack_offset
+                    .checked_add(length as u64)
+                    .ok_or_else(|| TileError::Validation("pack offset overflow".into()))?;
+            }
+        }
+
+        idx_writer.flush()?;
+        pack_writer.flush()?;
+
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(ref cb) = progress_cb {
+            cb(done, total_levels);
+        }
+        Ok(())
+    })?;
+
+    // Clean up dzsave output to save disk space.
+    std::fs::remove_dir_all(&tiles_dir)?;
+    let dzi_path = fastpath_dir.join("tiles.dzi");
+    if dzi_path.exists() {
+        std::fs::remove_file(&dzi_path)?;
+    }
+
+    Ok(())
+}
+
+/// Old sequential packing with per-tile stat calls (for benchmarking only).
+/// Does NOT remove tiles_files or tiles.dzi (caller handles cleanup).
+pub fn pack_dzsave_tiles_bench_seq_stat(
+    fastpath_dir: &Path,
+    levels: &[(u32, u32, u32)],
+) -> TileResult<()> {
+    let tiles_dir = fastpath_dir.join("tiles_files");
+    let out_dir = fastpath_dir.join("tiles");
+    std::fs::create_dir_all(&out_dir)?;
+
+    for (level, cols, rows) in levels.iter() {
+        let level_dir = tiles_dir.join(level.to_string());
+
+        let cols_u16 = u16::try_from(*cols).map_err(|_| {
+            TileError::Validation(format!("level {} cols exceeds u16: {}", level, cols))
+        })?;
+        let rows_u16 = u16::try_from(*rows).map_err(|_| {
+            TileError::Validation(format!("level {} rows exceeds u16: {}", level, rows))
+        })?;
+
+        let pack_file = File::create(out_dir.join(format!("level_{}.pack", level)))?;
+        let idx_file = File::create(out_dir.join(format!("level_{}.idx", level)))?;
         let mut pack_writer = BufWriter::new(pack_file);
         let mut idx_writer = BufWriter::new(idx_file);
 
@@ -293,7 +398,6 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
                 })?;
 
                 pack_writer.write_all(&data)?;
-
                 idx_writer.write_all(&pack_offset.to_le_bytes())?;
                 idx_writer.write_all(&length.to_le_bytes())?;
 
@@ -307,12 +411,166 @@ pub fn pack_dzsave_tiles(fastpath_dir: &Path, levels: &[(u32, u32, u32)]) -> Til
         pack_writer.flush()?;
     }
 
-    // Clean up dzsave output to save disk space.
-    std::fs::remove_dir_all(&tiles_dir)?;
-    let dzi_path = fastpath_dir.join("tiles.dzi");
-    if dzi_path.exists() {
-        std::fs::remove_file(&dzi_path)?;
+    Ok(())
+}
+
+/// Sequential packing with directory pre-scan (for benchmarking only).
+/// Does NOT remove tiles_files or tiles.dzi (caller handles cleanup).
+pub fn pack_dzsave_tiles_bench_seq_prescan(
+    fastpath_dir: &Path,
+    levels: &[(u32, u32, u32)],
+) -> TileResult<()> {
+    let tiles_dir = fastpath_dir.join("tiles_files");
+    let out_dir = fastpath_dir.join("tiles");
+    std::fs::create_dir_all(&out_dir)?;
+
+    for (level, cols, rows) in levels.iter() {
+        let level_dir = tiles_dir.join(level.to_string());
+
+        let cols_u16 = u16::try_from(*cols).map_err(|_| {
+            TileError::Validation(format!("level {} cols exceeds u16: {}", level, cols))
+        })?;
+        let rows_u16 = u16::try_from(*rows).map_err(|_| {
+            TileError::Validation(format!("level {} rows exceeds u16: {}", level, rows))
+        })?;
+
+        // Directory pre-scan
+        let mut tile_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for entry in std::fs::read_dir(&level_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(stem) = name_str.strip_suffix(".jpg")
+                .or_else(|| name_str.strip_suffix(".jpeg"))
+            {
+                tile_files.insert(stem.to_string(), entry.path());
+            }
+        }
+
+        let pack_file = File::create(out_dir.join(format!("level_{}.pack", level)))?;
+        let idx_file = File::create(out_dir.join(format!("level_{}.idx", level)))?;
+        let mut pack_writer = BufWriter::new(pack_file);
+        let mut idx_writer = BufWriter::new(idx_file);
+
+        idx_writer.write_all(LEVEL_MAGIC)?;
+        idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+        idx_writer.write_all(&cols_u16.to_le_bytes())?;
+        idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+        let mut pack_offset: u64 = 0;
+        for row in 0..*rows {
+            for col in 0..*cols {
+                let key = format!("{}_{}", col, row);
+                let tile_path = tile_files.get(&key);
+
+                let Some(tile_path) = tile_path else {
+                    idx_writer.write_all(&0u64.to_le_bytes())?;
+                    idx_writer.write_all(&0u32.to_le_bytes())?;
+                    continue;
+                };
+
+                let data = std::fs::read(tile_path)?;
+                let length: u32 = data.len().try_into().map_err(|_e| {
+                    TileError::Validation(format!(
+                        "Tile too large to pack ({} bytes): {}",
+                        data.len(),
+                        tile_path.display()
+                    ))
+                })?;
+
+                pack_writer.write_all(&data)?;
+                idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                idx_writer.write_all(&length.to_le_bytes())?;
+
+                pack_offset = pack_offset
+                    .checked_add(length as u64)
+                    .ok_or_else(|| TileError::Validation("pack offset overflow".into()))?;
+            }
+        }
+
+        idx_writer.flush()?;
+        pack_writer.flush()?;
     }
+
+    Ok(())
+}
+
+/// Parallel packing with prescan, without cleanup (for benchmarking only).
+pub fn pack_dzsave_tiles_bench_parallel(
+    fastpath_dir: &Path,
+    levels: &[(u32, u32, u32)],
+) -> TileResult<()> {
+    let tiles_dir = fastpath_dir.join("tiles_files");
+    let out_dir = fastpath_dir.join("tiles");
+    std::fs::create_dir_all(&out_dir)?;
+
+    levels.par_iter().try_for_each(|(level, cols, rows)| -> TileResult<()> {
+        let level_dir = tiles_dir.join(level.to_string());
+
+        let cols_u16 = u16::try_from(*cols).map_err(|_| {
+            TileError::Validation(format!("level {} cols exceeds u16: {}", level, cols))
+        })?;
+        let rows_u16 = u16::try_from(*rows).map_err(|_| {
+            TileError::Validation(format!("level {} rows exceeds u16: {}", level, rows))
+        })?;
+
+        let mut tile_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for entry in std::fs::read_dir(&level_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(stem) = name_str.strip_suffix(".jpg")
+                .or_else(|| name_str.strip_suffix(".jpeg"))
+            {
+                tile_files.insert(stem.to_string(), entry.path());
+            }
+        }
+
+        let pack_file = File::create(out_dir.join(format!("level_{}.pack", level)))?;
+        let idx_file = File::create(out_dir.join(format!("level_{}.idx", level)))?;
+        let mut pack_writer = BufWriter::new(pack_file);
+        let mut idx_writer = BufWriter::new(idx_file);
+
+        idx_writer.write_all(LEVEL_MAGIC)?;
+        idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+        idx_writer.write_all(&cols_u16.to_le_bytes())?;
+        idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+        let mut pack_offset: u64 = 0;
+        for row in 0..*rows {
+            for col in 0..*cols {
+                let key = format!("{}_{}", col, row);
+                let tile_path = tile_files.get(&key);
+
+                let Some(tile_path) = tile_path else {
+                    idx_writer.write_all(&0u64.to_le_bytes())?;
+                    idx_writer.write_all(&0u32.to_le_bytes())?;
+                    continue;
+                };
+
+                let data = std::fs::read(tile_path)?;
+                let length: u32 = data.len().try_into().map_err(|_e| {
+                    TileError::Validation(format!(
+                        "Tile too large to pack ({} bytes): {}",
+                        data.len(),
+                        tile_path.display()
+                    ))
+                })?;
+
+                pack_writer.write_all(&data)?;
+                idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                idx_writer.write_all(&length.to_le_bytes())?;
+
+                pack_offset = pack_offset
+                    .checked_add(length as u64)
+                    .ok_or_else(|| TileError::Validation("pack offset overflow".into()))?;
+            }
+        }
+
+        idx_writer.flush()?;
+        pack_writer.flush()?;
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -358,7 +616,7 @@ mod tests {
 
         fs::write(dir.join("tiles.dzi"), b"dummy").unwrap();
 
-        pack_dzsave_tiles(dir, &[(0, 2, 1), (1, 1, 1)]).unwrap();
+        pack_dzsave_tiles(dir, &[(0, 2, 1), (1, 1, 1)], None).unwrap();
 
         assert!(!tiles_dir.exists(), "tiles_files should be removed");
         assert!(!dir.join("tiles.dzi").exists(), "tiles.dzi should be removed");
@@ -381,5 +639,312 @@ mod tests {
         let t1 = pack.tile_ref(1, 0, 0).unwrap();
         let b1 = pack.read_tile_bytes(t1).unwrap();
         assert_eq!(b1.as_ref(), jpeg.as_slice());
+    }
+
+    /// Old sequential implementation (for benchmarking comparison).
+    fn pack_dzsave_tiles_sequential(
+        fastpath_dir: &Path,
+        levels: &[(u32, u32, u32)],
+    ) -> TileResult<()> {
+        let tiles_dir = fastpath_dir.join("tiles_files");
+        let out_dir = fastpath_dir.join("tiles");
+        fs::create_dir_all(&out_dir)?;
+
+        for (level, cols, rows) in levels.iter() {
+            let level_dir = tiles_dir.join(level.to_string());
+
+            let cols_u16 = u16::try_from(*cols).unwrap();
+            let rows_u16 = u16::try_from(*rows).unwrap();
+
+            let pack_path = out_dir.join(format!("level_{}.pack", level));
+            let idx_path = out_dir.join(format!("level_{}.idx", level));
+
+            let pack_file = File::create(&pack_path)?;
+            let idx_file = File::create(&idx_path)?;
+            let mut pack_writer = BufWriter::new(pack_file);
+            let mut idx_writer = BufWriter::new(idx_file);
+
+            idx_writer.write_all(LEVEL_MAGIC)?;
+            idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+            idx_writer.write_all(&cols_u16.to_le_bytes())?;
+            idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+            let mut pack_offset: u64 = 0;
+            for row in 0..*rows {
+                for col in 0..*cols {
+                    // Old approach: 2 stat calls per tile
+                    let jpg = level_dir.join(format!("{}_{}.jpg", col, row));
+                    let jpeg = level_dir.join(format!("{}_{}.jpeg", col, row));
+
+                    let tile_path = if jpg.exists() {
+                        Some(jpg)
+                    } else if jpeg.exists() {
+                        Some(jpeg)
+                    } else {
+                        None
+                    };
+
+                    let Some(tile_path) = tile_path else {
+                        idx_writer.write_all(&0u64.to_le_bytes())?;
+                        idx_writer.write_all(&0u32.to_le_bytes())?;
+                        continue;
+                    };
+
+                    let data = fs::read(&tile_path)?;
+                    let length: u32 = data.len().try_into().unwrap();
+
+                    pack_writer.write_all(&data)?;
+                    idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                    idx_writer.write_all(&length.to_le_bytes())?;
+                    pack_offset += length as u64;
+                }
+            }
+
+            idx_writer.flush()?;
+            pack_writer.flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Old sequential implementation with per-tile stat calls (no prescan).
+    fn pack_dzsave_tiles_seq_stat(
+        fastpath_dir: &Path,
+        levels: &[(u32, u32, u32)],
+    ) -> TileResult<()> {
+        let tiles_dir = fastpath_dir.join("tiles_files");
+        let out_dir = fastpath_dir.join("tiles");
+        fs::create_dir_all(&out_dir)?;
+
+        for (level, cols, rows) in levels.iter() {
+            let level_dir = tiles_dir.join(level.to_string());
+
+            let cols_u16 = u16::try_from(*cols).unwrap();
+            let rows_u16 = u16::try_from(*rows).unwrap();
+
+            let pack_path = out_dir.join(format!("level_{}.pack", level));
+            let idx_path = out_dir.join(format!("level_{}.idx", level));
+
+            let pack_file = File::create(&pack_path)?;
+            let idx_file = File::create(&idx_path)?;
+            let mut pack_writer = BufWriter::new(pack_file);
+            let mut idx_writer = BufWriter::new(idx_file);
+
+            idx_writer.write_all(LEVEL_MAGIC)?;
+            idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+            idx_writer.write_all(&cols_u16.to_le_bytes())?;
+            idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+            let mut pack_offset: u64 = 0;
+            for row in 0..*rows {
+                for col in 0..*cols {
+                    let jpg = level_dir.join(format!("{}_{}.jpg", col, row));
+                    let jpeg = level_dir.join(format!("{}_{}.jpeg", col, row));
+
+                    let tile_path = if jpg.exists() {
+                        Some(jpg)
+                    } else if jpeg.exists() {
+                        Some(jpeg)
+                    } else {
+                        None
+                    };
+
+                    let Some(tile_path) = tile_path else {
+                        idx_writer.write_all(&0u64.to_le_bytes())?;
+                        idx_writer.write_all(&0u32.to_le_bytes())?;
+                        continue;
+                    };
+
+                    let data = fs::read(&tile_path)?;
+                    let length: u32 = data.len().try_into().unwrap();
+
+                    pack_writer.write_all(&data)?;
+                    idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                    idx_writer.write_all(&length.to_le_bytes())?;
+                    pack_offset += length as u64;
+                }
+            }
+
+            idx_writer.flush()?;
+            pack_writer.flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Sequential with directory pre-scan (isolates prescan improvement).
+    fn pack_dzsave_tiles_seq_prescan(
+        fastpath_dir: &Path,
+        levels: &[(u32, u32, u32)],
+    ) -> TileResult<()> {
+        let tiles_dir = fastpath_dir.join("tiles_files");
+        let out_dir = fastpath_dir.join("tiles");
+        fs::create_dir_all(&out_dir)?;
+
+        for (level, cols, rows) in levels.iter() {
+            let level_dir = tiles_dir.join(level.to_string());
+
+            let cols_u16 = u16::try_from(*cols).unwrap();
+            let rows_u16 = u16::try_from(*rows).unwrap();
+
+            let mut tile_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+            for entry in fs::read_dir(&level_dir)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if let Some(stem) = name_str.strip_suffix(".jpg")
+                    .or_else(|| name_str.strip_suffix(".jpeg"))
+                {
+                    tile_files.insert(stem.to_string(), entry.path());
+                }
+            }
+
+            let pack_path = out_dir.join(format!("level_{}.pack", level));
+            let idx_path = out_dir.join(format!("level_{}.idx", level));
+
+            let pack_file = File::create(&pack_path)?;
+            let idx_file = File::create(&idx_path)?;
+            let mut pack_writer = BufWriter::new(pack_file);
+            let mut idx_writer = BufWriter::new(idx_file);
+
+            idx_writer.write_all(LEVEL_MAGIC)?;
+            idx_writer.write_all(&LEVEL_VERSION.to_le_bytes())?;
+            idx_writer.write_all(&cols_u16.to_le_bytes())?;
+            idx_writer.write_all(&rows_u16.to_le_bytes())?;
+
+            let mut pack_offset: u64 = 0;
+            for row in 0..*rows {
+                for col in 0..*cols {
+                    let key = format!("{}_{}", col, row);
+                    let tile_path = tile_files.get(&key);
+
+                    let Some(tile_path) = tile_path else {
+                        idx_writer.write_all(&0u64.to_le_bytes())?;
+                        idx_writer.write_all(&0u32.to_le_bytes())?;
+                        continue;
+                    };
+
+                    let data = fs::read(tile_path)?;
+                    let length: u32 = data.len().try_into().unwrap();
+
+                    pack_writer.write_all(&data)?;
+                    idx_writer.write_all(&pack_offset.to_le_bytes())?;
+                    idx_writer.write_all(&length.to_le_bytes())?;
+                    pack_offset += length as u64;
+                }
+            }
+
+            idx_writer.flush()?;
+            pack_writer.flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Helper: create a tiles_files directory tree mimicking dzsave output.
+    /// `tile_size_bytes` controls the tile payload size (real tiles are ~20-50KB).
+    fn create_bench_tiles(
+        num_levels: u32,
+        tiles_per_side: u32,
+        tile_size_bytes: usize,
+    ) -> (TempDir, Vec<(u32, u32, u32)>) {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let tiles_dir = dir.join("tiles_files");
+
+        // Build a fake tile payload of the desired size (pad JPEG header with zeros)
+        let jpeg_header = test_jpeg_bytes();
+        let tile_data = if tile_size_bytes > jpeg_header.len() {
+            let mut data = jpeg_header;
+            data.resize(tile_size_bytes, 0u8);
+            data
+        } else {
+            jpeg_header
+        };
+
+        let mut levels = Vec::new();
+
+        for level in 0..num_levels {
+            let side = (tiles_per_side >> level).max(1);
+            let level_dir = tiles_dir.join(level.to_string());
+            fs::create_dir_all(&level_dir).unwrap();
+
+            for row in 0..side {
+                for col in 0..side {
+                    fs::write(level_dir.join(format!("{}_{}.jpg", col, row)), &tile_data).unwrap();
+                }
+            }
+
+            levels.push((level, side, side));
+        }
+
+        (temp, levels)
+    }
+
+    #[test]
+    fn bench_sequential_vs_parallel() {
+        use std::time::Instant;
+
+        const NUM_LEVELS: u32 = 12;
+        const TILES_PER_SIDE: u32 = 64; // 64x64 = 4096 tiles at highest level
+        const TILE_SIZE: usize = 30_000; // ~30KB, realistic Q80 JPEG 512x512
+        const RUNS: u32 = 3;
+
+        let mut seq_stat_times = Vec::new();
+        let mut seq_prescan_times = Vec::new();
+        let mut par_times = Vec::new();
+
+        for run in 0..RUNS {
+            // --- Old: sequential + per-tile stat ---
+            let (temp, levels) = create_bench_tiles(NUM_LEVELS, TILES_PER_SIDE, TILE_SIZE);
+            let start = Instant::now();
+            pack_dzsave_tiles_seq_stat(temp.path(), &levels).unwrap();
+            let elapsed = start.elapsed();
+            seq_stat_times.push(elapsed);
+            let seq_stat_ms = elapsed.as_secs_f64() * 1000.0;
+
+            // --- Sequential + prescan (isolates prescan improvement) ---
+            let (temp, levels) = create_bench_tiles(NUM_LEVELS, TILES_PER_SIDE, TILE_SIZE);
+            let start = Instant::now();
+            pack_dzsave_tiles_seq_prescan(temp.path(), &levels).unwrap();
+            let elapsed = start.elapsed();
+            seq_prescan_times.push(elapsed);
+            let seq_prescan_ms = elapsed.as_secs_f64() * 1000.0;
+
+            // --- New: parallel + prescan ---
+            let (temp, levels) = create_bench_tiles(NUM_LEVELS, TILES_PER_SIDE, TILE_SIZE);
+            let start = Instant::now();
+            pack_dzsave_tiles(temp.path(), &levels, None).unwrap();
+            let elapsed = start.elapsed();
+            par_times.push(elapsed);
+            let par_ms = elapsed.as_secs_f64() * 1000.0;
+
+            eprintln!(
+                "[BENCH run {}] seq+stat: {:.0}ms, seq+prescan: {:.0}ms, parallel: {:.0}ms",
+                run + 1, seq_stat_ms, seq_prescan_ms, par_ms,
+            );
+        }
+
+        let total_tiles: u32 = (0..NUM_LEVELS).map(|l| {
+            let side = (TILES_PER_SIDE >> l).max(1);
+            side * side
+        }).sum();
+        let total_bytes = total_tiles as u64 * TILE_SIZE as u64;
+
+        let avg = |v: &[std::time::Duration]| -> f64 {
+            v.iter().map(|t| t.as_secs_f64()).sum::<f64>() / v.len() as f64
+        };
+
+        let avg_seq_stat = avg(&seq_stat_times);
+        let avg_seq_prescan = avg(&seq_prescan_times);
+        let avg_par = avg(&par_times);
+
+        eprintln!("\n[BENCH] {NUM_LEVELS} levels, {total_tiles} tiles, {:.0}MB data",
+            total_bytes as f64 / 1_048_576.0);
+        eprintln!("[BENCH] avg seq+stat:    {:.0}ms", avg_seq_stat * 1000.0);
+        eprintln!("[BENCH] avg seq+prescan: {:.0}ms  ({:.2}x vs stat)",
+            avg_seq_prescan * 1000.0, avg_seq_stat / avg_seq_prescan);
+        eprintln!("[BENCH] avg parallel:    {:.0}ms  ({:.2}x vs stat)",
+            avg_par * 1000.0, avg_seq_stat / avg_par);
     }
 }

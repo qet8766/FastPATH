@@ -197,14 +197,25 @@ class TestPluginMetadata:
         assert meta.labels == ["A", "B", "C"]
 
     def test_resolution_spec(self):
+        # x20 pyramid (0.5 MPP) — plugin at 0.5 doesn't need original WSI
         spec = ResolutionSpec(working_mpp=0.5)
-        assert not spec.needs_original_wsi
+        assert not spec.needs_original_wsi(pyramid_mpp=0.5)
 
+        # Plugin at 0.25 MPP needs original WSI when pyramid is 0.5
         spec_fine = ResolutionSpec(working_mpp=0.25)
-        assert spec_fine.needs_original_wsi
+        assert spec_fine.needs_original_wsi(pyramid_mpp=0.5)
 
+        # Context MPP finer than pyramid triggers WSI access
         spec_context = ResolutionSpec(working_mpp=0.5, context_mpp=0.3)
-        assert spec_context.needs_original_wsi
+        assert spec_context.needs_original_wsi(pyramid_mpp=0.5)
+
+        # Native 10x pyramid (1.0 MPP) — plugin at 0.5 DOES need original WSI
+        assert spec.needs_original_wsi(pyramid_mpp=1.0)
+
+        # Coarse plugin (8.0 MPP) never needs original WSI
+        spec_coarse = ResolutionSpec(working_mpp=8.0)
+        assert not spec_coarse.needs_original_wsi(pyramid_mpp=0.5)
+        assert not spec_coarse.needs_original_wsi(pyramid_mpp=1.0)
 
 
 # ------------------------------------------------------------------

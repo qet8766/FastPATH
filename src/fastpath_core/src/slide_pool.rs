@@ -35,18 +35,31 @@ impl SlidePool {
     }
 
     /// Get a cached entry or load from disk.
+    ///
+    /// Uses double-checked locking: after acquiring the write lock, re-checks
+    /// if another thread inserted the entry while we were waiting. This prevents
+    /// two threads from simultaneously parsing metadata + opening pack files
+    /// for the same slide.
     pub fn load_or_get(&self, slide_id: u64, fastpath_dir: &Path) -> TileResult<Arc<SlideEntry>> {
-        // Fast path: already cached
+        // Fast path: already cached (read lock)
         if let Some(entry) = self.entries.read().get(&slide_id) {
             return Ok(Arc::clone(entry));
         }
 
-        // Slow path: load from disk
+        // Slow path: acquire write lock
+        let mut entries = self.entries.write();
+
+        // Re-check: another thread may have inserted while we waited for write lock
+        if let Some(entry) = entries.get(&slide_id) {
+            return Ok(Arc::clone(entry));
+        }
+
+        // Load from disk (holding write lock to prevent duplicate work)
         let metadata = SlideMetadata::load(fastpath_dir)?;
         let pack = TilePack::open(fastpath_dir)?;
         let entry = Arc::new(SlideEntry { metadata, pack });
 
-        self.entries.write().insert(slide_id, Arc::clone(&entry));
+        entries.insert(slide_id, Arc::clone(&entry));
         Ok(entry)
     }
 

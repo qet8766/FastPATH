@@ -880,7 +880,7 @@ impl TileScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{create_test_fastpath, test_compressed_tile};
+    use crate::test_utils::{create_test_fastpath, create_test_fastpath_with_tiles, test_compressed_tile};
     use tempfile::TempDir;
 
     #[test]
@@ -1307,5 +1307,161 @@ mod tests {
         scheduler.load(temp_b.path().to_str().unwrap()).unwrap();
 
         assert_eq!(scheduler.pool.len(), 2);
+    }
+
+    // --- Prefetch path tests (using real JPEG tiles) ---
+
+    #[test]
+    fn test_prefetch_low_res_levels_populates_cache() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath_with_tiles(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        // L1 should be empty before prefetch
+        let stats_before = scheduler.cache_stats();
+        assert_eq!(stats_before.l1.num_tiles, 0);
+
+        scheduler.prefetch_low_res_levels();
+
+        // After prefetch, L1 should have tiles populated.
+        // The test slide has level 0 (1x1=1 tile) and level 1 (2x2=4 tiles),
+        // both under MAX_TILES_PER_LEVEL, so all 5 tiles should be prefetched.
+        let stats_after = scheduler.cache_stats();
+        assert!(stats_after.l1.num_tiles > 0, "L1 should have tiles after prefetch");
+        // Verify specific tile is cached
+        let coord = TileCoord::new(0, 0, 0);
+        assert!(scheduler.cache.contains(&coord), "level 0 tile (0,0) should be cached");
+    }
+
+    #[test]
+    fn test_jpeg_prefetch_populates_l2_only() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath_with_tiles(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+        let slide_id = scheduler.active_slide_id.load(Ordering::Acquire);
+        let gen = scheduler.generation.load(Ordering::Acquire);
+
+        let entry = {
+            let slide = scheduler.slide.read();
+            Arc::clone(slide.as_ref().unwrap())
+        };
+
+        let coord = TileCoord::new(0, 0, 0);
+
+        // Use the JPEG-only prefetch path
+        let inserted = scheduler.load_tile_jpeg_for_prefetch(&coord, &entry.pack, slide_id, gen);
+        assert!(inserted, "JPEG prefetch should insert into L2");
+
+        // L2 should have the tile
+        let l2_coord = SlideTileCoord::new(slide_id, 0, 0, 0);
+        assert!(scheduler.l2_cache.contains(&l2_coord), "L2 should contain the tile");
+
+        // L1 should NOT have the tile (JPEG prefetch skips L1)
+        assert!(!scheduler.cache.contains(&coord), "L1 should NOT contain the tile after JPEG-only prefetch");
+    }
+
+    #[test]
+    fn test_prefetch_low_res_levels_skips_cached() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath_with_tiles(temp.path());
+
+        let scheduler = TileScheduler::new(512, 64, 2);
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        // First prefetch — populates cache
+        scheduler.prefetch_low_res_levels();
+
+        let stats_first = scheduler.cache_stats();
+        let tiles_after_first = stats_first.l1.num_tiles;
+        assert!(tiles_after_first > 0, "first prefetch should load tiles");
+
+        // Reset stats to track second prefetch independently
+        scheduler.reset_cache_stats();
+
+        // Second prefetch — all tiles already cached, should skip
+        scheduler.prefetch_low_res_levels();
+
+        let stats_second = scheduler.cache_stats();
+        // On the second run, tiles are already in L1, so no new L1 misses
+        // from the prefetch path (the cache.contains() check skips them).
+        // The tile count should remain the same.
+        assert_eq!(
+            stats_second.l1.num_tiles, tiles_after_first,
+            "second prefetch should not add new tiles"
+        );
+    }
+
+    // --- Concurrent load/close tests ---
+
+    #[test]
+    fn test_concurrent_load_close_no_panic() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath_with_tiles(temp.path());
+        let path_str = temp.path().to_str().unwrap().to_string();
+
+        let scheduler = Arc::new(TileScheduler::new(512, 64, 2));
+        let num_threads = 8;
+        let iterations = 20;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let sched = Arc::clone(&scheduler);
+                let path = path_str.clone();
+                std::thread::spawn(move || {
+                    for j in 0..iterations {
+                        if (i + j) % 2 == 0 {
+                            let _ = sched.load(&path);
+                        } else {
+                            sched.close();
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+
+        // Scheduler should be in a consistent state after concurrent hammering
+        // (either loaded or closed, no corruption)
+        let _ = scheduler.is_loaded();
+        let _ = scheduler.cache_stats();
+    }
+
+    #[test]
+    fn test_close_during_prefetch_discards_stale() {
+        let temp = TempDir::new().unwrap();
+        create_test_fastpath_with_tiles(temp.path());
+
+        let scheduler = Arc::new(TileScheduler::new(512, 64, 2));
+        scheduler.load(temp.path().to_str().unwrap()).unwrap();
+
+        let gen_before_close = scheduler.generation.load(Ordering::Acquire);
+
+        // Grab the pack for manual prefetch
+        let entry = {
+            let slide = scheduler.slide.read();
+            Arc::clone(slide.as_ref().unwrap())
+        };
+
+        // Close the slide — bumps generation, clears L1
+        scheduler.close();
+
+        // Now attempt a prefetch with the OLD generation — should be discarded
+        let coord = TileCoord::new(0, 0, 0);
+        let result = scheduler.load_tile_for_prefetch(
+            &coord,
+            &entry.pack,
+            gen_before_close, // stale generation
+        );
+        assert!(result.is_none(), "stale prefetch should return None");
+
+        // L1 should be empty (closed + stale prefetch discarded)
+        assert!(!scheduler.cache.contains(&coord), "stale tile should not appear in L1");
     }
 }

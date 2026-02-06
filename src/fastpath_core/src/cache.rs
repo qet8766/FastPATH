@@ -44,11 +44,12 @@ pub struct SlideTileCoord {
 
 impl SlideTileCoord {
     pub fn new(slide_id: u64, level: u32, col: u32, row: u32) -> Self {
-        // These bounds are extremely generous for WSI tiles.
-        // If violated, it's better to fail loudly than to risk key collisions.
-        assert!(level <= u16::MAX as u32, "level out of range: {level}");
-        assert!(col < (1 << 24), "col out of range: {col}");
-        assert!(row < (1 << 24), "row out of range: {row}");
+        // These bounds are guaranteed by the pack_v2 format (u16 cols/rows)
+        // and structurally bounded level counts. debug_assert catches future
+        // bugs during development without penalizing release builds.
+        debug_assert!(level <= u16::MAX as u32, "level out of range: {level}");
+        debug_assert!(col < (1 << 24), "col out of range: {col}");
+        debug_assert!(row < (1 << 24), "row out of range: {row}");
 
         let coord = ((level as u64) << 48) | ((col as u64) << 24) | (row as u64);
         Self { slide_id, coord }

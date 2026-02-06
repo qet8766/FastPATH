@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import threading
@@ -217,21 +218,8 @@ class AppController(QObject):
 
             if not resolved.exists():
                 logger.error("Slide not found: %s", resolved)
-                self.errorOccurred.emit(f"File not found: {resolved}")
+                self.errorOccurred.emit(f"Slide file not found: {resolved}")
                 return False
-
-            # Clear all visual state from previous slide BEFORE loading new one.
-            # This prevents stale tiles from flashing during the transition:
-            # - tile model: QML main layer still referencing old source URLs
-            # - fallback model: QML fallback layer (z:0) showing old slide's tiles
-            # - previous_level: stale value causes _update_fallback_on_level_change
-            #   to skip the update or copy wrong tiles on first render
-            self._tile_model.clear()
-            self._fallback_tile_model.clear()
-            self._previous_level = -1
-
-            # Bump generation so tile URLs change, forcing QML to re-request images
-            self._slide_generation += 1
 
             # Load with Rust scheduler FIRST (for tile loading)
             # This must happen before SlideManager.load() which emits slideLoaded signal
@@ -248,6 +236,15 @@ class AppController(QObject):
                 self.errorOccurred.emit("Failed to load slide metadata")
                 return False
 
+            # === BOTH LOADS SUCCEEDED — now safe to clear old visual state ===
+            # Clear tile models and bump generation only after confirming
+            # both loads succeeded, so the user still sees the previous slide
+            # if loading fails (atomic slide switch).
+            self._tile_model.clear()
+            self._fallback_tile_model.clear()
+            self._previous_level = -1
+            self._slide_generation += 1
+
             logger.info("Slide loaded: %s", resolved)
 
             self._plugin_manager.set_slide(str(resolved))
@@ -262,9 +259,21 @@ class AppController(QObject):
             self._start_bulk_preload()
             return True
 
+        except FileNotFoundError:
+            self.errorOccurred.emit(f"Slide file not found: {path}")
+            return False
+        except PermissionError:
+            self.errorOccurred.emit("Cannot open slide: permission denied")
+            return False
+        except json.JSONDecodeError:
+            self.errorOccurred.emit("Slide metadata is corrupted")
+            return False
+        except RuntimeError as e:
+            self.errorOccurred.emit(f"Failed to load slide data: {e}")
+            return False
         except Exception as e:
             logger.exception("Error opening slide: %s", path)
-            self.errorOccurred.emit(str(e))
+            self.errorOccurred.emit(f"Unexpected error ({type(e).__name__}): {e}")
             return False
         finally:
             self._loading = False
@@ -272,15 +281,21 @@ class AppController(QObject):
     @Slot()
     def closeSlide(self) -> None:
         """Close the current slide."""
-        self._slide_manager.close()
-        self._rust_scheduler.cancel_bulk_preload()
-        self._rust_scheduler.close()
-        self._plugin_manager.clear_slide()
-        self._current_path = ""
-        self.slidePathChanged.emit()
-        self._tile_model.clear()
-        self._fallback_tile_model.clear()
-        self._previous_level = -1
+        if not self._loading_lock.acquire(blocking=False):
+            logger.warning("Slide load in progress, skipping close")
+            return
+        try:
+            self._slide_manager.close()
+            self._rust_scheduler.cancel_bulk_preload()
+            self._rust_scheduler.close()
+            self._plugin_manager.clear_slide()
+            self._current_path = ""
+            self.slidePathChanged.emit()
+            self._tile_model.clear()
+            self._fallback_tile_model.clear()
+            self._previous_level = -1
+        finally:
+            self._loading_lock.release()
 
     @Slot()
     def clearRecentSlides(self) -> None:

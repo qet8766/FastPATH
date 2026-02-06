@@ -325,9 +325,57 @@ impl RustTileScheduler {
 /// Args:
 ///   path: Path to the .fastpath directory (must contain tiles_files from dzsave)
 ///   levels: List of (level, cols, rows) entries
+///   progress_cb: Optional callable(level_index, total_levels) called after each level
 #[pyfunction]
-fn pack_dzsave_tiles(path: &str, levels: Vec<(u32, u32, u32)>) -> PyResult<()> {
-    pack::pack_dzsave_tiles(Path::new(path), &levels)?;
+#[pyo3(signature = (path, levels, progress_cb=None))]
+fn pack_dzsave_tiles(
+    py: Python<'_>,
+    path: &str,
+    levels: Vec<(u32, u32, u32)>,
+    progress_cb: Option<PyObject>,
+) -> PyResult<()> {
+    let cb = progress_cb.map(|py_cb| -> Box<dyn Fn(u32, u32) + Send + Sync> {
+        let py_cb = std::sync::Mutex::new(py_cb);
+        Box::new(move |level_idx: u32, total_levels: u32| {
+            let py_cb = py_cb.lock().unwrap();
+            Python::with_gil(|py| {
+                if let Err(e) = py_cb.call1(py, (level_idx, total_levels)) {
+                    eprintln!("[PACK] Progress callback error: {e}");
+                }
+            });
+        })
+    });
+
+    py.allow_threads(|| pack::pack_dzsave_tiles(Path::new(path), &levels, cb))?;
+    Ok(())
+}
+
+/// Benchmark: old sequential + per-tile stat packing (no cleanup).
+#[pyfunction]
+fn bench_pack_seq_stat(py: Python<'_>, path: &str, levels: Vec<(u32, u32, u32)>) -> PyResult<()> {
+    py.allow_threads(|| pack::pack_dzsave_tiles_bench_seq_stat(Path::new(path), &levels))?;
+    Ok(())
+}
+
+/// Benchmark: sequential + directory prescan packing (no cleanup).
+#[pyfunction]
+fn bench_pack_seq_prescan(
+    py: Python<'_>,
+    path: &str,
+    levels: Vec<(u32, u32, u32)>,
+) -> PyResult<()> {
+    py.allow_threads(|| pack::pack_dzsave_tiles_bench_seq_prescan(Path::new(path), &levels))?;
+    Ok(())
+}
+
+/// Benchmark: parallel + prescan packing (no cleanup).
+#[pyfunction]
+fn bench_pack_parallel(
+    py: Python<'_>,
+    path: &str,
+    levels: Vec<(u32, u32, u32)>,
+) -> PyResult<()> {
+    py.allow_threads(|| pack::pack_dzsave_tiles_bench_parallel(Path::new(path), &levels))?;
     Ok(())
 }
 
@@ -344,6 +392,9 @@ fn fastpath_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TileBuffer>()?;
     m.add_class::<FastpathTileReader>()?;
     m.add_function(wrap_pyfunction!(pack_dzsave_tiles, m)?)?;
+    m.add_function(wrap_pyfunction!(bench_pack_seq_stat, m)?)?;
+    m.add_function(wrap_pyfunction!(bench_pack_seq_prescan, m)?)?;
+    m.add_function(wrap_pyfunction!(bench_pack_parallel, m)?)?;
     m.add_function(wrap_pyfunction!(is_debug_build, m)?)?;
     Ok(())
 }

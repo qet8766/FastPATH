@@ -28,6 +28,9 @@ ai = [
 dev = [
     "pytest>=8.0",
     "pytest-qt>=4.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.26",
 ]
 vips = [
     "pyvips>=2.2",
@@ -59,8 +62,8 @@ build-backend = "hatchling.build"
 packages = ["src/fastpath"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+testpaths = ["tests", "web/tests"]
+pythonpath = ["src", "."]
 
 [tool.uv]
 prerelease = "allow"
@@ -80,4 +83,8 @@ dev = [
     "maturin>=1.11.5",
     "pytest>=9.0.2",
     "pytest-qt>=4.5.0",
+    "fastapi>=0.110",
+    "hypercorn[h3]>=0.17.0",
+    "httpx>=0.26",
+    "pytest-playwright>=0.7.2",
 ]

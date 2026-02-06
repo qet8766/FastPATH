@@ -13,6 +13,7 @@ Rectangle {
     property bool isProcessing: false
     property bool batchComplete: false
     property bool force: false
+    property bool nativeMpp: false
     property string errorMessage: ""
 
     property alias selectedTileSize: tileSizeCombo.currentText
@@ -23,6 +24,7 @@ Rectangle {
     signal tileSizeActivated(int tileSize)
     signal workersActivated(int workers)
     signal forceToggled(bool checked)
+    signal nativeMppToggled(bool checked)
 
     Layout.fillWidth: true
     Layout.preferredHeight: formLayout.implicitHeight + Theme.spacingLarge * 2
@@ -150,6 +152,25 @@ Rectangle {
                 }
             }
 
+            // Resolution mode
+            Label {
+                text: "Resolution"
+                color: Theme.text
+            }
+            ThemedComboBox {
+                id: resolutionCombo
+                model: ["0.5 MPP (20x)", "Native"]
+                enabled: !root.isProcessing && !root.batchComplete
+
+                Component.onCompleted: {
+                    currentIndex = root.nativeMpp ? 1 : 0
+                }
+
+                onActivated: {
+                    root.nativeMppToggled(currentIndex === 1)
+                }
+            }
+
             // Parallel workers (folder mode only)
             Label {
                 text: "Parallel Workers"
@@ -196,7 +217,9 @@ Rectangle {
 
         // Info label
         Label {
-            text: "Output: 0.5 MPP (20x equivalent), JPEG Q80"
+            text: root.nativeMpp
+                ? "Output: Native resolution, JPEG Q80 (larger output, .fastpath_native)"
+                : "Output: 0.5 MPP (20x equivalent), JPEG Q80"
             color: Theme.textMuted
             font.pixelSize: Theme.fontSizeSmall
             font.italic: true

@@ -13,17 +13,22 @@ from fastpath.core.types import LevelInfo
 logger = logging.getLogger(__name__)
 
 
-def pyramid_dir_for_slide(slide_path: Path, output_dir: Path) -> Path:
+def pyramid_dir_for_slide(
+    slide_path: Path, output_dir: Path, native_mpp: bool = False
+) -> Path:
     """Construct the .fastpath directory path for a slide.
 
     Args:
         slide_path: Path to the source WSI file
         output_dir: Parent directory for the .fastpath folder
+        native_mpp: If True, use ``.fastpath_native`` extension
 
     Returns:
         Path like ``output_dir / "slide_name.fastpath"``
+        or ``output_dir / "slide_name.fastpath_native"``
     """
-    return output_dir / (slide_path.stem + ".fastpath")
+    ext = ".fastpath_native" if native_mpp else ".fastpath"
+    return output_dir / (slide_path.stem + ext)
 
 
 class PyramidStatus(Enum):
@@ -105,6 +110,7 @@ class PyramidMetadata:
     background_color: tuple[int, int, int]
     preprocessed_at: str
     tile_format: str = "pack_v2"
+    native_mpp_mode: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +133,7 @@ class PyramidMetadata:
             "background_color": list(self.background_color),
             "preprocessed_at": self.preprocessed_at,
             "tile_format": self.tile_format,
+            "native_mpp_mode": self.native_mpp_mode,
         }
 
     @classmethod
@@ -151,4 +158,5 @@ class PyramidMetadata:
             background_color=tuple(data["background_color"]),
             preprocessed_at=data["preprocessed_at"],
             tile_format=data.get("tile_format", "pack_v2"),
+            native_mpp_mode=data.get("native_mpp_mode", False),
         )

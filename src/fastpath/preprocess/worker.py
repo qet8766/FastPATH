@@ -19,16 +19,19 @@ def process_single_slide(
     output_dir: Path,
     tile_size: int,
     force: bool = False,
+    native_mpp: bool = False,
 ) -> tuple[Path | None, str | None, bool]:
     """Process a single slide.
 
-    Always produces 0.5 MPP, JPEG Q80.
+    Produces 0.5 MPP by default, or preserves native resolution when
+    ``native_mpp=True``. Always JPEG Q80.
 
     Args:
         slide_path: Path to the WSI file
         output_dir: Output directory
         tile_size: Tile size in pixels
         force: Force rebuild
+        native_mpp: If True, skip downsampling and use source resolution
 
     Returns:
         Tuple of (result_path, error_message, was_skipped)
@@ -38,7 +41,7 @@ def process_single_slide(
     """
     logger.info("Processing %s", slide_path.name)
     try:
-        builder = VipsPyramidBuilder(tile_size=tile_size)
+        builder = VipsPyramidBuilder(tile_size=tile_size, native_mpp=native_mpp)
         result = builder.build(slide_path, output_dir, force=force)
         if result is None:
             # Slide was skipped (already complete)

@@ -49,12 +49,18 @@ class ResolutionSpec:
     working_mpp: float = 0.5
     context_mpp: float | None = None
 
-    @property
-    def needs_original_wsi(self) -> bool:
-        """True if any requested MPP is finer than the pyramid's 0.5 MPP."""
-        if self.working_mpp < 0.5:
+    def needs_original_wsi(self, pyramid_mpp: float) -> bool:
+        """True if any requested MPP is finer than the pyramid's MPP.
+
+        Args:
+            pyramid_mpp: The actual MPP of the preprocessed pyramid
+                (from metadata ``target_mpp``).  Varies per slide —
+                0.5 for resampled x20, but coarser for native-resolution
+                slides that were not downsampled.
+        """
+        if self.working_mpp < pyramid_mpp:
             return True
-        if self.context_mpp is not None and self.context_mpp < 0.5:
+        if self.context_mpp is not None and self.context_mpp < pyramid_mpp:
             return True
         return False
 

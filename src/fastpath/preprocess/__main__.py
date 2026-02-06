@@ -63,14 +63,16 @@ def _check_prerequisites() -> None:
 
 
 def _print_header(
-    wsi_files: list[Path], output_dir: Path, tile_size: int, force: bool
+    wsi_files: list[Path], output_dir: Path, tile_size: int, force: bool,
+    native_mpp: bool = False,
 ) -> None:
     """Print the CLI banner with processing parameters."""
     click.echo(click.style("FastPATH Preprocessing", fg="cyan", bold=True))
     click.echo(click.style("=" * 40, fg="cyan"))
     click.echo(f"Found {len(wsi_files)} WSI file(s)")
     click.echo(f"Output directory: {output_dir}")
-    click.echo(f"Tile size: {tile_size}px | Target: 0.5 MPP | JPEG Q80")
+    target_label = "Native MPP" if native_mpp else "0.5 MPP"
+    click.echo(f"Tile size: {tile_size}px | Target: {target_label} | JPEG Q80")
     if force:
         click.echo(click.style("Force mode: will rebuild existing pyramids", fg="yellow"))
     click.echo()
@@ -82,6 +84,7 @@ def _process_slides(
     tile_size: int,
     parallel_slides: int,
     force: bool,
+    native_mpp: bool = False,
 ) -> tuple[int, int, int, list[tuple[Path, str]]]:
     """Process slides in parallel using ProcessPoolExecutor.
 
@@ -91,6 +94,7 @@ def _process_slides(
         tile_size: Tile size in pixels
         parallel_slides: Number of parallel workers
         force: Force rebuild existing pyramids
+        native_mpp: If True, skip downsampling and use source resolution
 
     Returns:
         Tuple of (success_count, skipped_count, error_count, errors)
@@ -108,6 +112,7 @@ def _process_slides(
                 output_dir,
                 tile_size,
                 force,
+                native_mpp,
             ): f
             for f in wsi_files
         }
@@ -124,7 +129,7 @@ def _process_slides(
                     errors.append((slide_path, str(e)))
                     click.echo(f"\nWorker crashed processing {slide_path.name}: {e}", err=True)
                     # Clean up partial output if exists
-                    partial_output = pyramid_dir_for_slide(slide_path, output_dir)
+                    partial_output = pyramid_dir_for_slide(slide_path, output_dir, native_mpp=native_mpp)
                     if partial_output.exists():
                         try:
                             shutil.rmtree(partial_output)
@@ -209,19 +214,27 @@ def _print_summary(
     is_flag=True,
     help="Force rebuild even if slide is already preprocessed",
 )
+@click.option(
+    "--native-mpp",
+    is_flag=True,
+    help="Preserve source slide's native resolution (skip downsampling to 0.5 MPP). "
+         "Warning: ~4x larger output for typical 40x slides.",
+)
 def main(
     input_path: str,
     output: str,
     tile_size: int,
     parallel_slides: int,
     force: bool,
+    native_mpp: bool,
 ) -> None:
     """Preprocess whole-slide images into tile pyramids.
 
     INPUT_PATH can be a single WSI file or a directory containing WSI files.
     Supported formats: SVS, NDPI, TIF, TIFF, MRXS, VMS, VMU, SCN.
 
-    Always produces 0.5 MPP (20x equivalent), JPEG Q80, using pyvips dzsave.
+    By default produces 0.5 MPP (20x equivalent), JPEG Q80, using pyvips dzsave.
+    Use --native-mpp to preserve the source slide's native resolution.
 
     Examples:
 
@@ -233,6 +246,9 @@ def main(
 
         # Process with larger tiles
         python -m fastpath.preprocess slide.svs -o ./output/ -t 1024
+
+        # Preserve native resolution (40x)
+        python -m fastpath.preprocess slide.svs -o ./output/ --native-mpp
     """
     input_path = Path(input_path)
     output_dir = Path(output)
@@ -243,7 +259,7 @@ def main(
         sys.exit(1)
 
     _check_prerequisites()
-    _print_header(wsi_files, output_dir, tile_size, force)
+    _print_header(wsi_files, output_dir, tile_size, force, native_mpp)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,7 +268,7 @@ def main(
     os.environ["VIPS_DISC_THRESHOLD"] = VIPS_DISC_THRESHOLD
 
     success, skipped, error_count, errors = _process_slides(
-        wsi_files, output_dir, tile_size, parallel_slides, force
+        wsi_files, output_dir, tile_size, parallel_slides, force, native_mpp
     )
     _print_summary(success, skipped, error_count, errors, force)
 

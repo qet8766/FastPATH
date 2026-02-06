@@ -69,9 +69,9 @@ def require_vips_openslide() -> None:
 class VipsPyramidBuilder:
     """Fast pyramid builder using pyvips dzsave().
 
-    Loads OpenSlide level 0 and resizes to exactly 0.5 MPP (20x equivalent),
-    then generates tile pyramid using libvips' native Deep Zoom generator.
-    Always outputs JPEG Q80.
+    Loads OpenSlide level 0 and resizes to 0.5 MPP (20x equivalent) by default.
+    When ``native_mpp=True``, skips resizing and preserves the source slide's
+    native resolution. Always outputs JPEG Q80.
 
     Requirements:
         - pyvips with OpenSlide support (libvips compiled with openslide)
@@ -81,9 +81,10 @@ class VipsPyramidBuilder:
         - Level 0 = lowest resolution, level N = highest resolution (native dzsave convention)
     """
 
-    def __init__(self, tile_size: int = 512) -> None:
+    def __init__(self, tile_size: int = 512, native_mpp: bool = False) -> None:
         require_vips_openslide()
         self.tile_size = tile_size
+        self.native_mpp = native_mpp
 
     def build(
         self,
@@ -118,7 +119,7 @@ class VipsPyramidBuilder:
         )
         self._run_dzsave(image, pyramid_dir, progress_callback)
         levels = self._calculate_levels_from_dimensions(dimensions[0], dimensions[1], self.tile_size)
-        self._pack_tiles(pyramid_dir, levels)
+        self._pack_tiles(pyramid_dir, levels, progress_callback)
         self._write_metadata(
             pyramid_dir, slide_path, base_mpp, actual_mpp, actual_mag, dimensions, levels
         )
@@ -137,7 +138,7 @@ class VipsPyramidBuilder:
             Path to the .fastpath directory (may not exist yet)
         """
         output_dir.mkdir(parents=True, exist_ok=True)
-        return pyramid_dir_for_slide(slide_path, output_dir)
+        return pyramid_dir_for_slide(slide_path, output_dir, native_mpp=self.native_mpp)
 
     def _handle_existing_pyramid(
         self, pyramid_dir: Path, slide_name: str, force: bool
@@ -155,6 +156,20 @@ class VipsPyramidBuilder:
         status = check_pyramid_status(pyramid_dir)
 
         if status == PyramidStatus.COMPLETE and not force:
+            # Warn if existing pyramid was built with a different MPP mode
+            try:
+                with open(pyramid_dir / "metadata.json") as f:
+                    existing = json.load(f)
+                existing_native = existing.get("native_mpp_mode", False)
+                if existing_native != self.native_mpp:
+                    mode_was = "native MPP" if existing_native else "0.5 MPP"
+                    mode_now = "native MPP" if self.native_mpp else "0.5 MPP"
+                    logger.warning(
+                        "%s was built with %s but %s was requested (use --force to rebuild)",
+                        slide_name, mode_was, mode_now,
+                    )
+            except (OSError, json.JSONDecodeError, KeyError):
+                pass
             logger.info("Skipping %s: already preprocessed (use --force to rebuild)", slide_name)
             return True
 
@@ -185,6 +200,9 @@ class VipsPyramidBuilder:
     ) -> tuple[Any, float, float, float, tuple[int, int]]:
         """Load slide at level 0 and resize to TARGET_MPP.
 
+        When ``native_mpp`` is enabled, skips all resizing and uses the source
+        resolution as-is.
+
         Args:
             slide_path: Path to the source WSI file
             progress_callback: Optional callback(stage, current, total)
@@ -199,7 +217,10 @@ class VipsPyramidBuilder:
         base_mpp = self._get_base_mpp(image, slide_path.name)
         logger.info("Loaded %s: %d x %d px (MPP %.4f)", slide_path.name, image.width, image.height, base_mpp)
 
-        if base_mpp < TARGET_MPP:
+        if self.native_mpp:
+            logger.info("Native MPP mode: using source resolution (%.4f MPP)", base_mpp)
+            actual_mpp = base_mpp
+        elif base_mpp < TARGET_MPP:
             if progress_callback:
                 progress_callback("resize", 0, 1)
             resize_factor = base_mpp / TARGET_MPP
@@ -314,7 +335,12 @@ class VipsPyramidBuilder:
         )
         logger.debug("Tile pyramid generated")
 
-    def _pack_tiles(self, pyramid_dir: Path, levels: list[LevelInfo]) -> None:
+    def _pack_tiles(
+        self,
+        pyramid_dir: Path,
+        levels: list[LevelInfo],
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         """Pack dzsave tiles into per-level pack files and remove the dzsave output."""
         tiles_dir = pyramid_dir / "tiles_files"
         if not tiles_dir.exists():
@@ -327,9 +353,17 @@ class VipsPyramidBuilder:
                 "fastpath_core is required for packing tiles (Rust extension missing)"
             ) from e
 
+        def _on_level(level_idx: int, total_levels: int) -> None:
+            if progress_callback is not None:
+                progress_callback("packing", level_idx + 1, total_levels)
+
         try:
             level_tuples = [(info.level, info.cols, info.rows) for info in levels]
-            pack_dzsave_tiles(str(pyramid_dir), level_tuples)
+            pack_dzsave_tiles(
+                str(pyramid_dir),
+                level_tuples,
+                _on_level if progress_callback is not None else None,
+            )
         except Exception as e:
             raise RuntimeError(f"Rust packer failed: {e}") from e
 
@@ -366,6 +400,7 @@ class VipsPyramidBuilder:
             background_color=BACKGROUND_COLOR,
             preprocessed_at=datetime.now(timezone.utc).isoformat(),
             tile_format="pack_v2",
+            native_mpp_mode=self.native_mpp,
         )
 
         with open(pyramid_dir / "metadata.json", "w") as f:
@@ -444,10 +479,12 @@ def build_pyramid(
     tile_size: int = 512,
     progress_callback: Callable[[str, int, int], None] | None = None,
     force: bool = False,
+    native_mpp: bool = False,
 ) -> Path | None:
     """Build a tile pyramid using VipsPyramidBuilder.
 
-    Always produces 0.5 MPP, JPEG Q80.
+    Produces 0.5 MPP by default, or preserves native resolution when
+    ``native_mpp=True``. Always JPEG Q80.
 
     Args:
         slide_path: Path to WSI file
@@ -455,6 +492,7 @@ def build_pyramid(
         tile_size: Tile size in pixels
         progress_callback: Progress callback function
         force: Force rebuild even if already complete
+        native_mpp: If True, skip downsampling and use source resolution
 
     Returns:
         Path to the created .fastpath directory, or None if skipped
@@ -462,5 +500,5 @@ def build_pyramid(
     Raises:
         RuntimeError: If pyvips with OpenSlide support is not available
     """
-    builder = VipsPyramidBuilder(tile_size=tile_size)
+    builder = VipsPyramidBuilder(tile_size=tile_size, native_mpp=native_mpp)
     return builder.build(slide_path, output_dir, progress_callback, force=force)
